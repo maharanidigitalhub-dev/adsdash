@@ -6,8 +6,7 @@ interface UserProfile {
   email: string
   full_name: string | null
   role: 'founder' | 'admin' | 'client'
-  client_id: string | null
-  client_name?: string
+  assigned_clients: string[]
 }
 
 interface Client {
@@ -40,11 +39,36 @@ function Input({ value, onChange, type = 'text', placeholder }: { value: string;
   )
 }
 
+function ClientCheckboxes({ clients, selected, onChange }: { clients: Client[], selected: string[], onChange: (ids: string[]) => void }) {
+  const toggle = (id: string) => {
+    if (selected.includes(id)) onChange(selected.filter(x => x !== id))
+    else onChange([...selected, id])
+  }
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginTop: '4px' }}>
+      {clients.map(c => (
+        <label key={c.client_id} style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer',
+          padding: '5px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: 500,
+          border: selected.includes(c.client_id) ? '1.5px solid #185FA5' : '0.5px solid rgba(0,0,0,0.15)',
+          background: selected.includes(c.client_id) ? '#E6F1FB' : '#fff',
+          color: selected.includes(c.client_id) ? '#185FA5' : '#555',
+        }}>
+          <input type="checkbox" checked={selected.includes(c.client_id)} onChange={() => toggle(c.client_id)}
+            style={{ display: 'none' }} />
+          {selected.includes(c.client_id) ? '✓ ' : ''}{c.client_name}
+        </label>
+      ))}
+      {clients.length === 0 && <span style={{ fontSize: '11px', color: '#888' }}>Belum ada client</span>}
+    </div>
+  )
+}
+
 export default function UserManagementTab() {
   const [users, setUsers] = useState<UserProfile[]>([])
   const [clients, setClients] = useState<Client[]>([])
   const [loading, setLoading] = useState(true)
   const [showAddUser, setShowAddUser] = useState(false)
+  const [expandedUser, setExpandedUser] = useState<string | null>(null)
   const [showResetPassword, setShowResetPassword] = useState<string | null>(null)
   const [newPassword, setNewPassword] = useState('')
   const [successMsg, setSuccessMsg] = useState('')
@@ -52,11 +76,7 @@ export default function UserManagementTab() {
   const [submitting, setSubmitting] = useState(false)
 
   const [form, setForm] = useState({
-    email: '',
-    password: '',
-    full_name: '',
-    role: 'client',
-    client_id: '',
+    email: '', password: '', full_name: '', role: 'client', client_ids: [] as string[],
   })
 
   useEffect(() => {
@@ -64,25 +84,25 @@ export default function UserManagementTab() {
     fetchClients()
   }, [])
 
-  const fetchUsers = async () => {
-    setLoading(true)
-    const { data: profiles } = await supabase
-      .from('profiles')
-      .select('*, dim_clients(client_name)')
-      .order('role')
-
-    if (profiles) {
-      setUsers(profiles.map((p: any) => ({
-        ...p,
-        client_name: Array.isArray(p.dim_clients) ? p.dim_clients[0]?.client_name : p.dim_clients?.client_name,
-      })))
-    }
-    setLoading(false)
-  }
-
   const fetchClients = async () => {
     const { data } = await supabase.from('dim_clients').select('client_id, client_name').eq('is_active', true).order('client_name')
     if (data) setClients(data)
+  }
+
+  const fetchUsers = async () => {
+    setLoading(true)
+
+    const { data: profiles } = await supabase.from('profiles').select('id, email, full_name, role').order('role')
+    const { data: userClients } = await supabase.from('user_clients').select('user_id, client_id')
+
+    if (profiles) {
+      const mapped = profiles.map((p: any) => ({
+        ...p,
+        assigned_clients: userClients?.filter(uc => uc.user_id === p.id).map(uc => uc.client_id) || [],
+      }))
+      setUsers(mapped)
+    }
+    setLoading(false)
   }
 
   const handleAddUser = async () => {
@@ -98,14 +118,20 @@ export default function UserManagementTab() {
       const res = await fetch('/api/create-user', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
+        body: JSON.stringify({
+          email: form.email,
+          password: form.password,
+          full_name: form.full_name,
+          role: form.role,
+          client_ids: form.client_ids,
+        }),
       })
       const data = await res.json()
       if (!res.ok) {
         setErrorMsg(data.error || 'Gagal membuat user')
       } else {
         setSuccessMsg(`User ${form.email} berhasil dibuat!`)
-        setForm({ email: '', password: '', full_name: '', role: 'client', client_id: '' })
+        setForm({ email: '', password: '', full_name: '', role: 'client', client_ids: [] })
         setShowAddUser(false)
         fetchUsers()
       }
@@ -115,14 +141,27 @@ export default function UserManagementTab() {
     setSubmitting(false)
   }
 
-  const handleResetPassword = async (userId: string) => {
-    if (!newPassword || newPassword.length < 6) {
-      setErrorMsg('Password minimal 6 karakter')
-      return
+  const handleUpdateClients = async (userId: string, clientIds: string[]) => {
+    // Hapus semua assignment lama
+    await supabase.from('user_clients').delete().eq('user_id', userId)
+    // Insert assignment baru
+    if (clientIds.length > 0) {
+      await supabase.from('user_clients').insert(clientIds.map(cid => ({ user_id: userId, client_id: cid })))
     }
+    setSuccessMsg('Client assignment berhasil diupdate!')
+    fetchUsers()
+  }
+
+  const handleUpdateRole = async (userId: string, newRole: string) => {
+    const { error } = await supabase.from('profiles').update({ role: newRole }).eq('id', userId)
+    if (error) setErrorMsg('Gagal update role: ' + error.message)
+    else { setSuccessMsg('Role berhasil diupdate!'); fetchUsers() }
+  }
+
+  const handleResetPassword = async (userId: string) => {
+    if (!newPassword || newPassword.length < 6) { setErrorMsg('Password minimal 6 karakter'); return }
     setSubmitting(true)
     setErrorMsg('')
-
     try {
       const res = await fetch('/api/reset-password', {
         method: 'POST',
@@ -130,23 +169,15 @@ export default function UserManagementTab() {
         body: JSON.stringify({ user_id: userId, new_password: newPassword }),
       })
       const data = await res.json()
-      if (!res.ok) {
-        setErrorMsg(data.error || 'Gagal reset password')
-      } else {
-        setSuccessMsg('Password berhasil direset!')
-        setShowResetPassword(null)
-        setNewPassword('')
-      }
-    } catch (err: any) {
-      setErrorMsg(err.message)
-    }
+      if (!res.ok) setErrorMsg(data.error || 'Gagal reset password')
+      else { setSuccessMsg('Password berhasil direset!'); setShowResetPassword(null); setNewPassword('') }
+    } catch (err: any) { setErrorMsg(err.message) }
     setSubmitting(false)
   }
 
   const handleDeleteUser = async (userId: string, email: string) => {
-    if (!confirm(`Hapus user ${email}? Tindakan ini tidak bisa dibatalkan.`)) return
+    if (!confirm(`Hapus user ${email}?`)) return
     setSubmitting(true)
-
     try {
       const res = await fetch('/api/delete-user', {
         method: 'DELETE',
@@ -154,37 +185,17 @@ export default function UserManagementTab() {
         body: JSON.stringify({ user_id: userId }),
       })
       const data = await res.json()
-      if (!res.ok) {
-        setErrorMsg(data.error || 'Gagal hapus user')
-      } else {
-        setSuccessMsg(`User ${email} berhasil dihapus`)
-        fetchUsers()
-      }
-    } catch (err: any) {
-      setErrorMsg(err.message)
-    }
+      if (!res.ok) setErrorMsg(data.error || 'Gagal hapus user')
+      else { setSuccessMsg(`User ${email} berhasil dihapus`); fetchUsers() }
+    } catch (err: any) { setErrorMsg(err.message) }
     setSubmitting(false)
-  }
-
-  const handleUpdateRole = async (userId: string, newRole: string, clientId: string | null) => {
-    const { error } = await supabase
-      .from('profiles')
-      .update({ role: newRole, client_id: clientId })
-      .eq('id', userId)
-
-    if (error) {
-      setErrorMsg('Gagal update role: ' + error.message)
-    } else {
-      setSuccessMsg('Role berhasil diupdate!')
-      fetchUsers()
-    }
   }
 
   return (
     <div style={{ maxWidth: '1100px', margin: '0 auto' }}>
 
-      {successMsg && <div style={{ background: '#EAF3DE', color: '#27500A', fontSize: '12px', padding: '10px 14px', borderRadius: '8px', marginBottom: '16px' }}>✓ {successMsg}</div>}
-      {errorMsg && <div style={{ background: '#FCEBEB', color: '#A32D2D', fontSize: '12px', padding: '10px 14px', borderRadius: '8px', marginBottom: '16px' }}>⚠ {errorMsg}</div>}
+      {successMsg && <div onClick={() => setSuccessMsg('')} style={{ background: '#EAF3DE', color: '#27500A', fontSize: '12px', padding: '10px 14px', borderRadius: '8px', marginBottom: '16px', cursor: 'pointer' }}>✓ {successMsg}</div>}
+      {errorMsg && <div onClick={() => setErrorMsg('')} style={{ background: '#FCEBEB', color: '#A32D2D', fontSize: '12px', padding: '10px 14px', borderRadius: '8px', marginBottom: '16px', cursor: 'pointer' }}>⚠ {errorMsg}</div>}
 
       {/* Add User Form */}
       {showAddUser && (
@@ -203,16 +214,10 @@ export default function UserManagementTab() {
                 <option value="founder">Founder</option>
               </select>
             </div>
-            {form.role === 'client' && (
-              <div>
-                <Label>Assign ke Client</Label>
-                <select value={form.client_id} onChange={e => setForm(f => ({ ...f, client_id: e.target.value }))}
-                  style={{ width: '100%', padding: '8px 10px', fontSize: '12px', border: '0.5px solid rgba(0,0,0,0.2)', borderRadius: '6px', background: '#fff', outline: 'none' }}>
-                  <option value="">— Pilih Client —</option>
-                  {clients.map(c => <option key={c.client_id} value={c.client_id}>{c.client_name}</option>)}
-                </select>
-              </div>
-            )}
+          </div>
+          <div style={{ marginBottom: '14px' }}>
+            <Label>Assign ke Client (bisa lebih dari 1)</Label>
+            <ClientCheckboxes clients={clients} selected={form.client_ids} onChange={ids => setForm(f => ({ ...f, client_ids: ids }))} />
           </div>
           <div style={{ display: 'flex', gap: '10px' }}>
             <button onClick={handleAddUser} disabled={submitting}
@@ -243,75 +248,87 @@ export default function UserManagementTab() {
         {loading ? (
           <div style={{ textAlign: 'center', padding: '20px', color: '#888', fontSize: '12px' }}>Memuat...</div>
         ) : (
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '11px' }}>
-              <thead>
-                <tr>
-                  {['Nama', 'Email', 'Role', 'Client', 'Password', 'Hapus'].map(h => (
-                    <th key={h} style={{ textAlign: 'left', padding: '6px 8px', color: '#888', borderBottom: '0.5px solid rgba(0,0,0,0.08)', fontWeight: 500 }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {users.map((user, i) => (
-                  <>
-                    <tr key={user.id} style={{ background: i % 2 === 1 ? '#fafaf9' : '#fff' }}>
-                      <td style={{ padding: '8px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)', fontWeight: 500 }}>{user.full_name || '—'}</td>
-                      <td style={{ padding: '8px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)', color: '#888' }}>{user.email}</td>
-                      <td style={{ padding: '8px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)' }}>
-                        <select value={user.role}
-                          onChange={e => handleUpdateRole(user.id, e.target.value, user.client_id)}
-                          style={{ fontSize: '11px', padding: '2px 6px', border: '0.5px solid rgba(0,0,0,0.15)', borderRadius: '4px', background: '#fff', outline: 'none' }}>
-                          <option value="client">client</option>
-                          <option value="admin">admin</option>
-                          <option value="founder">founder</option>
-                        </select>
-                      </td>
-                      <td style={{ padding: '8px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)' }}>
-                        <select value={user.client_id || ''}
-                          onChange={e => handleUpdateRole(user.id, user.role, e.target.value || null)}
-                          style={{ fontSize: '11px', padding: '2px 6px', border: '0.5px solid rgba(0,0,0,0.15)', borderRadius: '4px', background: '#fff', outline: 'none' }}>
-                          <option value="">— Tidak ada —</option>
-                          {clients.map(c => <option key={c.client_id} value={c.client_id}>{c.client_name}</option>)}
-                        </select>
-                      </td>
-                      <td style={{ padding: '8px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)' }}>
-                        <button onClick={() => { setShowResetPassword(showResetPassword === user.id ? null : user.id); setNewPassword('') }}
-                          style={{ fontSize: '10px', padding: '3px 8px', background: '#E6F1FB', color: '#185FA5', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 500 }}>
-                          Reset
-                        </button>
-                      </td>
-                      <td style={{ padding: '8px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)' }}>
-                        <button onClick={() => handleDeleteUser(user.id, user.email)}
-                          style={{ fontSize: '10px', padding: '3px 8px', background: '#FCEBEB', color: '#A32D2D', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>
-                          Hapus
-                        </button>
-                      </td>
-                    </tr>
-                    {showResetPassword === user.id && (
-                      <tr key={`reset-${user.id}`}>
-                        <td colSpan={6} style={{ padding: '8px', background: '#f5f5f3', borderBottom: '0.5px solid rgba(0,0,0,0.05)' }}>
-                          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                            <span style={{ fontSize: '11px', color: '#888', whiteSpace: 'nowrap' }}>Password baru untuk {user.email}:</span>
-                            <input type="text" value={newPassword} onChange={e => setNewPassword(e.target.value)}
-                              placeholder="min. 6 karakter"
-                              style={{ padding: '6px 10px', fontSize: '11px', border: '0.5px solid rgba(0,0,0,0.2)', borderRadius: '6px', outline: 'none', width: '200px' }} />
-                            <button onClick={() => handleResetPassword(user.id)} disabled={submitting}
-                              style={{ padding: '6px 14px', background: '#185FA5', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '11px', cursor: 'pointer', fontWeight: 500 }}>
-                              {submitting ? 'Menyimpan...' : 'Simpan'}
-                            </button>
-                            <button onClick={() => { setShowResetPassword(null); setNewPassword('') }}
-                              style={{ padding: '6px 10px', background: '#fff', color: '#555', border: '0.5px solid rgba(0,0,0,0.15)', borderRadius: '6px', fontSize: '11px', cursor: 'pointer' }}>
-                              Batal
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
+          <div>
+            {users.map((user, i) => (
+              <div key={user.id} style={{ border: '0.5px solid rgba(0,0,0,0.08)', borderRadius: '8px', marginBottom: '8px', overflow: 'hidden' }}>
+                {/* User Row */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto auto auto auto', gap: '8px', alignItems: 'center', padding: '10px 12px', background: i % 2 === 0 ? '#fff' : '#fafaf9' }}>
+                  <div>
+                    <div style={{ fontSize: '12px', fontWeight: 500 }}>{user.full_name || '—'}</div>
+                    <div style={{ fontSize: '11px', color: '#888' }}>{user.email}</div>
+                  </div>
+                  <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                    {user.assigned_clients.length > 0 ? (
+                      user.assigned_clients.map(cid => {
+                        const c = clients.find(x => x.client_id === cid)
+                        return c ? (
+                          <span key={cid} style={{ fontSize: '10px', padding: '1px 6px', borderRadius: '99px', background: '#E6F1FB', color: '#185FA5', fontWeight: 500 }}>{c.client_name}</span>
+                        ) : null
+                      })
+                    ) : (
+                      <span style={{ fontSize: '11px', color: '#aaa' }}>Belum ada client</span>
                     )}
-                  </>
-                ))}
-              </tbody>
-            </table>
+                  </div>
+                  <div>
+                    <select value={user.role} onChange={e => handleUpdateRole(user.id, e.target.value)}
+                      style={{ fontSize: '11px', padding: '3px 6px', border: '0.5px solid rgba(0,0,0,0.15)', borderRadius: '4px', background: '#fff', outline: 'none' }}>
+                      <option value="client">client</option>
+                      <option value="admin">admin</option>
+                      <option value="founder">founder</option>
+                    </select>
+                  </div>
+                  <button onClick={() => setExpandedUser(expandedUser === user.id ? null : user.id)}
+                    style={{ fontSize: '10px', padding: '3px 8px', background: '#E6F1FB', color: '#185FA5', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 500, whiteSpace: 'nowrap' }}>
+                    {expandedUser === user.id ? 'Tutup' : 'Edit Client'}
+                  </button>
+                  <button onClick={() => { setShowResetPassword(showResetPassword === user.id ? null : user.id); setNewPassword('') }}
+                    style={{ fontSize: '10px', padding: '3px 8px', background: '#f5f5f3', color: '#555', border: '0.5px solid rgba(0,0,0,0.12)', borderRadius: '4px', cursor: 'pointer', whiteSpace: 'nowrap' }}>
+                    Reset PW
+                  </button>
+                  <button onClick={() => handleDeleteUser(user.id, user.email)}
+                    style={{ fontSize: '10px', padding: '3px 8px', background: '#FCEBEB', color: '#A32D2D', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>
+                    Hapus
+                  </button>
+                </div>
+
+                {/* Edit Client Expanded */}
+                {expandedUser === user.id && (
+                  <div style={{ padding: '12px 14px', background: '#f5f5f3', borderTop: '0.5px solid rgba(0,0,0,0.06)' }}>
+                    <div style={{ fontSize: '11px', color: '#555', marginBottom: '8px', fontWeight: 500 }}>Pilih client yang bisa diakses oleh {user.full_name || user.email}:</div>
+                    <ClientCheckboxes
+                      clients={clients}
+                      selected={user.assigned_clients}
+                      onChange={ids => {
+                        setUsers(prev => prev.map(u => u.id === user.id ? { ...u, assigned_clients: ids } : u))
+                      }}
+                    />
+                    <button
+                      onClick={() => handleUpdateClients(user.id, user.assigned_clients)}
+                      style={{ marginTop: '10px', padding: '6px 16px', background: '#185FA5', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '11px', fontWeight: 500, cursor: 'pointer' }}>
+                      Simpan Perubahan
+                    </button>
+                  </div>
+                )}
+
+                {/* Reset Password Expanded */}
+                {showResetPassword === user.id && (
+                  <div style={{ padding: '10px 14px', background: '#f5f5f3', borderTop: '0.5px solid rgba(0,0,0,0.06)', display: 'flex', gap: '8px', alignItems: 'center' }}>
+                    <span style={{ fontSize: '11px', color: '#888', whiteSpace: 'nowrap' }}>Password baru:</span>
+                    <input type="text" value={newPassword} onChange={e => setNewPassword(e.target.value)}
+                      placeholder="min. 6 karakter"
+                      style={{ padding: '6px 10px', fontSize: '11px', border: '0.5px solid rgba(0,0,0,0.2)', borderRadius: '6px', outline: 'none', width: '200px' }} />
+                    <button onClick={() => handleResetPassword(user.id)} disabled={submitting}
+                      style={{ padding: '6px 14px', background: '#185FA5', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '11px', cursor: 'pointer', fontWeight: 500 }}>
+                      {submitting ? 'Menyimpan...' : 'Simpan'}
+                    </button>
+                    <button onClick={() => { setShowResetPassword(null); setNewPassword('') }}
+                      style={{ padding: '6px 10px', background: '#fff', color: '#555', border: '0.5px solid rgba(0,0,0,0.15)', borderRadius: '6px', fontSize: '11px', cursor: 'pointer' }}>
+                      Batal
+                    </button>
+                  </div>
+                )}
+              </div>
+            ))}
           </div>
         )}
       </div>

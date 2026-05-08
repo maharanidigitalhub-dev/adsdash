@@ -10,14 +10,13 @@ const supabaseAdmin = createClient(
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
-  const { email, password, full_name, role, client_id } = req.body
+  const { email, password, full_name, role, client_ids } = req.body
 
   if (!email || !password || !role) {
     return res.status(400).json({ error: 'Email, password, dan role wajib diisi' })
   }
 
   try {
-    // Create user di Supabase Auth
     const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
       email,
       password,
@@ -29,21 +28,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(400).json({ error: authError?.message || 'Gagal membuat user' })
     }
 
-    // Insert ke profiles table
     const { error: profileError } = await supabaseAdmin
       .from('profiles')
-      .insert({
-        id: authData.user.id,
-        email,
-        full_name,
-        role,
-        client_id: client_id || null,
-      })
+      .insert({ id: authData.user.id, email, full_name, role, client_id: null })
 
     if (profileError) {
-      // Rollback — hapus user yang baru dibuat
       await supabaseAdmin.auth.admin.deleteUser(authData.user.id)
       return res.status(400).json({ error: profileError.message })
+    }
+
+    // Insert ke user_clients jika ada client_ids
+    if (client_ids && client_ids.length > 0) {
+      await supabaseAdmin.from('user_clients').insert(
+        client_ids.map((cid: string) => ({ user_id: authData.user.id, client_id: cid }))
+      )
     }
 
     return res.status(200).json({ success: true, user_id: authData.user.id })
