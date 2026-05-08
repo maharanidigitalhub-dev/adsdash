@@ -20,6 +20,7 @@ export default function TabNav({ activeTab, onTabChange, role }: Props) {
       { id: 'settings' as Tab, label: 'Ads Setting' },
       { id: 'campaigns' as Tab, label: 'Update Setting' },
       { id: 'datainput' as Tab, label: 'Data Input' },
+      ...(role === 'founder' ? [{ id: 'users' as Tab, label: 'Users' }] : []),
     ] : []),
   ]
 
