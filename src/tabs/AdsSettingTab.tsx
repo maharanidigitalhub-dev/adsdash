@@ -236,9 +236,10 @@ export default function AdsSettingTab() {
     setStep(s => Math.min(5, s + 1))
   }
 
-  const handleSubmit = async () => {
-    setLoading(true)
-    try {
+    const handleSubmit = async () => {
+      setLoading(true)
+      alert('Submit dimulai - platform: ' + form.platform + ', client: ' + form.client_id) // ← tambah di sini
+      try {
       const { data: platformData } = await supabase.from('dim_platforms').select('platform_id').eq('platform_name', form.platform).single()
       if (!platformData) { alert('Platform tidak ditemukan'); return }
       const platformId = platformData.platform_id
