@@ -13,9 +13,10 @@ import AdsSettingTab from './tabs/AdsSettingTab'
 import UpdateSettingTab from './tabs/UpdateSettingTab'
 import DataInputTab from './tabs/DataInputTab'
 import { supabase } from './lib/supabase'
+import UserManagementTab from './tabs/UserManagementTab'
 import type { DailyRow, GlobalData } from './types/global'
 
-type Tab = 'overview' | 'campaign' | 'creative' | 'audience' | 'budget' | 'conversion' | 'settings' | 'campaigns' | 'datainput'
+type Tab = 'overview' | 'campaign' | 'creative' | 'audience' | 'budget' | 'conversion' | 'settings' | 'campaigns' | 'datainput' | 'users'
 
 function App() {
   const { user, profile, loading, signOut } = useAuth()
@@ -115,6 +116,7 @@ function App() {
         {canAccessAdmin && activeTab === 'settings' && <AdsSettingTab />}
         {canAccessAdmin && activeTab === 'campaigns' && <UpdateSettingTab />}
         {canAccessAdmin && activeTab === 'datainput' && <DataInputTab />}
+        {role === 'founder' && activeTab === 'users' && <UserManagementTab />}
       </main>
     </div>
   )
