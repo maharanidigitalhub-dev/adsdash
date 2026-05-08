@@ -42,38 +42,33 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let mounted = true
 
-    const init = async () => {
-      const { data: { session } } = await supabase.auth.getSession()
-
-      if (session?.user && mounted) {
-        setUser(session.user)
-        const p = await fetchProfile(session.user.id)
-        if (mounted) setProfile(p)
-      }
-
-      if (mounted) setLoading(false)
-    }
-
-    init()
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+    // Hanya pakai onAuthStateChange — tidak pakai getSession() bersamaan
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
       if (!mounted) return
 
       if (session?.user) {
         setUser(session.user)
         const p = await fetchProfile(session.user.id)
-        if (mounted) setProfile(p)
+        if (mounted) {
+          setProfile(p)
+          setLoading(false)
+        }
       } else {
         setUser(null)
         setProfile(null)
+        if (mounted) setLoading(false)
       }
-
-      if (mounted) setLoading(false)
     })
+
+    // Timeout fallback — kalau 5 detik tidak ada response, stop loading
+    const timeout = setTimeout(() => {
+      if (mounted) setLoading(false)
+    }, 5000)
 
     return () => {
       mounted = false
       subscription.unsubscribe()
+      clearTimeout(timeout)
     }
   }, [])
 
