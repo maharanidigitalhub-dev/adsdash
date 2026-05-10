@@ -66,7 +66,7 @@ const LINE_COLORS: Record<string, string> = {
   TikTok: '#888780',
 }
 
-export default function CampaignTab({ clientId = 'all' }: { clientId?: string }) {
+export default function CampaignTab({ clientId = 'all', globalData: _globalData }: { clientId?: string; globalData?: unknown }) {
   const [campaigns, setCampaigns] = useState<CampaignRow[]>([])
   const [dailyData, setDailyData] = useState<DailySpend[]>([])
   const [scatterData, setScatterData] = useState<{ x: number; y: number; platform: string; name: string }[]>([])

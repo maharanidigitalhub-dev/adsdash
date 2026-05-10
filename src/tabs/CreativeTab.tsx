@@ -80,7 +80,7 @@ function thumbBg(t: string) {
   return { bg: '#F1EFE8', color: '#5F5E5A', label: 'Responsive' }
 }
 
-export default function CreativeTab() {
+export default function CreativeTab(_props?: { globalData?: unknown }) {
   return (
     <div style={{ maxWidth: '1400px', margin: '0 auto' }}>
 

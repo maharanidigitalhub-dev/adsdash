@@ -30,7 +30,7 @@ const PLATFORM_COLORS: Record<string, string> = {
   TikTok: '#888780',
 }
 
-export default function ConversionTab({ clientId = 'all' }: { clientId?: string }) {
+export default function ConversionTab({ clientId = 'all', globalData: _globalData }: { clientId?: string; globalData?: unknown }) {
   const [rows, setRows] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
 

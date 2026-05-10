@@ -57,7 +57,7 @@ function getRoasColor(v: number) {
   return '#A32D2D'
 }
 
-export default function AudienceTab() {
+export default function AudienceTab(_props?: { globalData?: unknown }) {
   return (
     <div style={{ maxWidth: '1400px', margin: '0 auto' }}>
 
