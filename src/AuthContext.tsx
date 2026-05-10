@@ -48,13 +48,11 @@ let mounted = true
 const initAuth = async () => {
   const { data: { session } } = await supabase.auth.getSession()
   if (!mounted) return
-
   if (session?.user) {
     setUser(session.user)
     const p = await fetchProfile(session.user.id)
     if (mounted) setProfile(p)
   }
-
   if (mounted) setLoading(false)
 }
 
@@ -63,7 +61,6 @@ initAuth()
 const { data: { subscription } } = supabase.auth.onAuthStateChange(
   async (_event, session) => {
     if (!mounted) return
-
     if (session?.user) {
       setUser(session.user)
       const p = await fetchProfile(session.user.id)
@@ -94,22 +91,14 @@ return () => {
 
 const signOut = async () => {
 try {
-// Panggil signOut ke Supabase — ini trigger onAuthStateChange
-// yang akan set user & profile ke null otomatis
 await supabase.auth.signOut({ scope: ‘global’ })
 } catch (err) {
-// Kalau request gagal (misal offline), tetap bersihkan state lokal
-console.warn(‘signOut error (handled):’, err)
+console.warn(‘signOut error:’, err)
 setUser(null)
 setProfile(null)
 }
-// Bersihkan hanya storage key Supabase, jangan localStorage.clear()
-// karena itu bisa hapus data lain yang tidak berhubungan
 localStorage.removeItem(‘adsdash-auth-v2’)
 sessionStorage.removeItem(‘adsdash-auth-v2’)
-// TIDAK pakai window.location.href = ‘/login’
-// karena app ini SPA tanpa route /login — onAuthStateChange sudah
-// menangani redirect ke LoginPage via kondisi !user di App.tsx
 }
 
 return (
