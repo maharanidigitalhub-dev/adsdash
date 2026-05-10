@@ -1,32 +1,30 @@
-export type Platform = 'Meta' | 'Google' | 'TikTok'
+// src/types/index.ts
+// Role system: founder = superadmin, admin = manager, client = staff
+export type UserRole = 'founder' | 'admin' | 'client'
 
-export interface KpiData {
-  label: string
-  value: string
-  delta: string
-  isPositive: boolean
+export interface Profile {
+  id: string
+  email: string
+  full_name: string | null
+  role: UserRole
+  client_id: string | null
 }
 
-export interface DailyPerformance {
-  report_date: string
-  platform_id: number
-  campaign_id: string
-  impressions: number
-  clicks: number
-  spend: number
-  conversions_7d_click: number
-  conversion_value: number
+export interface AuthUser {
+  id: string
+  email: string
+  profile: Profile | null
 }
 
-export interface Campaign {
-  campaign_id: string
-  platform_id: number
-  campaign_name: string
-  objective: string
-  status: string
-  allocated_budget: number
-  start_date: string
-  end_date: string | null
-  target_roas: number
-  target_cpa: number
+export type Permission =
+  | 'manage_users'
+  | 'import_data'
+  | 'view_all_clients'
+  | 'view_settings'
+
+export const PERMISSIONS: Record<Permission, UserRole[]> = {
+  manage_users:     ['founder'],
+  import_data:      ['founder', 'admin'],
+  view_all_clients: ['founder', 'admin'],
+  view_settings:    ['founder', 'admin'],
 }
