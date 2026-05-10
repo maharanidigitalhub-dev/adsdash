@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
-import { useAuth } from '../AuthContext'
+import { useAuth } from '../contexts/AuthContext'
 
 const PLATFORMS = ['Meta', 'Google', 'TikTok']
 
