@@ -1,7 +1,8 @@
+// src/contexts/AuthContext.tsx
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react'
 import { User, Session } from '@supabase/supabase-js'
 import { supabase } from '../lib/supabase'
-import type { Profile, AuthUser, Permission } from '../types'
+import type { Profile, AuthUser, Permission, UserRole } from '../types'
 import { PERMISSIONS } from '../types'
 
 interface AuthContextValue {
@@ -12,9 +13,13 @@ interface AuthContextValue {
   signOut: () => Promise<void>
   refreshProfile: () => Promise<void>
   can: (permission: Permission) => boolean
-  isSuperadmin: boolean
-  isManager: boolean
-  isStaff: boolean
+  role: UserRole | null
+  isSuperadmin: boolean  // = founder
+  isManager: boolean     // = admin
+  isStaff: boolean       // = client
+  canManageUsers: boolean
+  canImportData: boolean
+  profile: Profile | null
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
@@ -25,13 +30,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true)
 
   const fetchProfile = async (authUser: User): Promise<Profile | null> => {
+    // Coba fetch by id dulu
     const { data, error } = await supabase
       .from('profiles')
       .select('*')
       .eq('id', authUser.id)
       .single()
-    if (error) { console.error('Error fetching profile:', error); return null }
-    return data as Profile
+
+    if (!error && data) return data as Profile
+
+    // Fallback: fetch by email kalau id mismatch
+    if (authUser.email) {
+      const { data: data2, error: error2 } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('email', authUser.email)
+        .single()
+
+      if (!error2 && data2) {
+        // Auto-fix id mismatch
+        await supabase
+          .from('profiles')
+          .update({ id: authUser.id })
+          .eq('email', authUser.email)
+        return data2 as Profile
+      }
+    }
+
+    console.error('fetchProfile failed:', error)
+    return null
   }
 
   const loadUser = async (authUser: User | null) => {
@@ -45,6 +72,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setSession(session)
       loadUser(session?.user ?? null).finally(() => setLoading(false))
     })
+
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (_event, session) => {
         setSession(session)
@@ -52,6 +80,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setLoading(false)
       }
     )
+
     return () => subscription.unsubscribe()
   }, [])
 
@@ -62,9 +91,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   const signOut = async () => {
-    await supabase.auth.signOut()
+    try {
+      await supabase.auth.signOut({ scope: 'global' })
+    } catch (err) {
+      console.warn('signOut error:', err)
+    }
     setUser(null)
     setSession(null)
+    localStorage.removeItem('adsdash-auth-v2')
+    sessionStorage.removeItem('adsdash-auth-v2')
   }
 
   const refreshProfile = async () => {
@@ -76,17 +111,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return PERMISSIONS[permission].includes(user.profile.role)
   }
 
-  const role = user?.profile?.role
-  const isSuperadmin = role === 'superadmin'
-  const isManager = role === 'manager'
-  const isStaff = role === 'staff'
+  const role = user?.profile?.role ?? null
+  const isSuperadmin = role === 'founder'
+  const isManager = role === 'founder' || role === 'admin'
+  const isStaff = role !== null
+  const canManageUsers = role === 'founder'
+  const canImportData = role === 'founder' || role === 'admin'
+  const profile = user?.profile ?? null
 
   return (
     <AuthContext.Provider value={{
-      user, session, loading, signIn, signOut, refreshProfile,
-      can, isSuperadmin, isManager, isStaff,
+      user, session, loading,
+      signIn, signOut, refreshProfile,
+      can, role, isSuperadmin, isManager, isStaff,
+      canManageUsers, canImportData, profile,
     }}>
-      {children}
+      {loading ? (
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          height: '100vh', fontSize: '14px', color: '#94a3b8',
+        }}>
+          Memuat sesi...
+        </div>
+      ) : (
+        children
+      )}
     </AuthContext.Provider>
   )
 }
