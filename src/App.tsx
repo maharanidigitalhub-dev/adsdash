@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from ‘react’
+ import { useState, useEffect, useCallback } from ‘react’
 import { useAuth } from ‘./AuthContext’
 import LoginPage from ‘./LoginPage’
 import TopBar from ‘./components/TopBar’
@@ -16,18 +16,20 @@ import UserManagementTab from ‘./tabs/UserManagementTab’
 import { supabase } from ‘./lib/supabase’
 import type { DailyRow, GlobalData, FilterState, Tab } from ‘./types/global’
 
-// Default filter: Last 30 hari, semua platform
-const today = new Date()
-const thirtyDaysAgo = new Date()
-thirtyDaysAgo.setDate(today.getDate() - 29)
+function getTodayStr() {
+return new Date().toISOString().slice(0, 10)
+}
+
+function getDaysAgoStr(n: number) {
+const d = new Date()
+d.setDate(d.getDate() - n)
+return d.toISOString().slice(0, 10)
+}
 
 const DEFAULT_FILTERS: FilterState = {
 platform: ‘All’,
 period: ‘Last 30 days’,
-dateRange: {
-from: thirtyDaysAgo.toISOString().slice(0, 10),
-to: today.toISOString().slice(0, 10),
-},
+dateRange: { from: getDaysAgoStr(29), to: getTodayStr() },
 }
 
 function App() {
@@ -38,8 +40,6 @@ const [globalRows, setGlobalRows] = useState<DailyRow[]>([])
 const [dataLoading, setDataLoading] = useState(true)
 const [filters, setFilters] = useState<FilterState>(DEFAULT_FILTERS)
 
-// Fetch data dari Supabase.
-// Filter platform & tanggal diterapkan di sini (server-side) untuk efisiensi.
 const fetchGlobalData = useCallback(async (
 clientId: string,
 activeFilters: FilterState,
@@ -56,23 +56,14 @@ let query = supabase
   `)
   .order('report_date', { ascending: true })
 
-// Filter client
 if (clientId !== 'all') {
   query = query.eq('client_id', clientId)
 }
 
-// Filter tanggal (kalau dateRange tersedia)
 if (activeFilters.dateRange) {
   query = query
     .gte('report_date', activeFilters.dateRange.from)
     .lte('report_date', activeFilters.dateRange.to)
-}
-
-// Filter platform — kalau bukan 'All', filter di query
-if (activeFilters.platform !== 'All') {
-  // join ke dim_platforms, filter berdasarkan platform_name
-  // Note: kalau foreign key tidak bisa difilter langsung via PostgREST,
-  // kita filter client-side setelah fetch (lihat mapped di bawah)
 }
 
 const { data, error } = await query
@@ -90,10 +81,9 @@ if (!error && data) {
       : r.dim_platforms?.platform_name || 'Unknown',
   }))
 
-  // Filter platform client-side (aman untuk semua konfigurasi Supabase)
   if (activeFilters.platform !== 'All') {
     mapped = mapped.filter(
-      row => row.platform_name.toLowerCase() === activeFilters.platform.toLowerCase()
+      (row) => row.platform_name.toLowerCase() === activeFilters.platform.toLowerCase()
     )
   }
 
@@ -107,41 +97,30 @@ setDataLoading(false)
 
 }, [])
 
-// Initial load ketika user/profile siap
 useEffect(() => {
 if (!user) return
-
-```
-if (profile?.role === 'client' && profile?.client_id) {
-  setSelectedClient(profile.client_id)
-  fetchGlobalData(profile.client_id, filters)
+if (profile?.role === ‘client’ && profile?.client_id) {
+setSelectedClient(profile.client_id)
+fetchGlobalData(profile.client_id, DEFAULT_FILTERS)
 } else {
-  fetchGlobalData('all', filters)
+fetchGlobalData(‘all’, DEFAULT_FILTERS)
 }
-```
-
 }, [user, profile])
 
-// Ketika client berubah
 const handleClientChange = (clientId: string) => {
 setSelectedClient(clientId)
 fetchGlobalData(clientId, filters)
 }
 
-// Ketika filter (platform/period) berubah
 const handleFilterChange = (newFilters: FilterState) => {
 setFilters(newFilters)
-// Kalau period = ‘Custom’ tapi dateRange belum diset, tunggu dulu
 if (newFilters.period === ‘Custom’ && !newFilters.dateRange) return
 fetchGlobalData(selectedClient, newFilters)
 }
 
 if (loading) {
 return (
-<div style={{
-minHeight: ‘100vh’, display: ‘flex’,
-alignItems: ‘center’, justifyContent: ‘center’, background: ‘#f5f5f3’,
-}}>
+<div style={{ minHeight: ‘100vh’, display: ‘flex’, alignItems: ‘center’, justifyContent: ‘center’, background: ‘#f5f5f3’ }}>
 <div style={{ fontSize: ‘14px’, color: ‘#888’ }}>Memuat…</div>
 </div>
 )
@@ -172,16 +151,16 @@ onFilterChange={handleFilterChange}
 />
 <TabNav activeTab={activeTab} onTabChange={setActiveTab} role={role} />
 <main className="p-4">
-{activeTab === ‘overview’    && <OverviewTab globalData={globalData} />}
-{activeTab === ‘campaign’    && <CampaignTab clientId={selectedClient} globalData={globalData} />}
-{activeTab === ‘creative’    && <CreativeTab globalData={globalData} />}
-{activeTab === ‘audience’    && <AudienceTab globalData={globalData} />}
-{activeTab === ‘budget’      && <BudgetTab clientId={selectedClient} globalData={globalData} />}
-{activeTab === ‘conversion’  && <ConversionTab clientId={selectedClient} globalData={globalData} />}
-{canAccessAdmin && activeTab === ‘settings’   && <AdsSettingTab />}
-{canAccessAdmin && activeTab === ‘campaigns’  && <UpdateSettingTab />}
-{canAccessAdmin && activeTab === ‘datainput’  && <DataInputTab />}
-{role === ‘founder’ && activeTab === ‘users’  && <UserManagementTab />}
+{activeTab === ‘overview’ && <OverviewTab globalData={globalData} />}
+{activeTab === ‘campaign’ && <CampaignTab clientId={selectedClient} />}
+{activeTab === ‘creative’ && <CreativeTab />}
+{activeTab === ‘audience’ && <AudienceTab />}
+{activeTab === ‘budget’ && <BudgetTab clientId={selectedClient} />}
+{activeTab === ‘conversion’ && <ConversionTab clientId={selectedClient} />}
+{canAccessAdmin && activeTab === ‘settings’ && <AdsSettingTab />}
+{canAccessAdmin && activeTab === ‘campaigns’ && <UpdateSettingTab />}
+{canAccessAdmin && activeTab === ‘datainput’ && <DataInputTab />}
+{role === ‘founder’ && activeTab === ‘users’ && <UserManagementTab />}
 </main>
 </div>
 )
