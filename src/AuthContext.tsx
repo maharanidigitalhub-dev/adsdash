@@ -29,15 +29,38 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [profile, setProfile] = useState<Profile | null>(null)
   const [loading, setLoading] = useState(true)
 
-  const fetchProfile = async (userId: string): Promise<Profile | null> => {
+  const fetchProfile = async (user: User): Promise<Profile | null> => {
     try {
+      // Coba fetch by id dulu (RLS: auth.uid() = id)
       const { data, error } = await supabase
         .from('profiles')
         .select('*')
-        .eq('id', userId)
+        .eq('id', user.id)
         .single()
+
       if (!error && data) return data as Profile
-    } catch {}
+
+      // Fallback: fetch by email kalau id tidak match (id mismatch di profiles)
+      if (user.email) {
+        const { data: data2, error: error2 } = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('email', user.email)
+          .single()
+
+        if (!error2 && data2) {
+          // Auto-fix: update id di profiles agar match auth.uid untuk ke depannya
+          await supabase
+            .from('profiles')
+            .update({ id: user.id })
+            .eq('email', user.email)
+
+          return data2 as Profile
+        }
+      }
+    } catch (err) {
+      console.error('fetchProfile error:', err)
+    }
     return null
   }
 
@@ -50,7 +73,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       if (session?.user) {
         setUser(session.user)
-        const p = await fetchProfile(session.user.id)
+        const p = await fetchProfile(session.user)
         if (mounted) setProfile(p)
       }
 
@@ -65,7 +88,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
         if (session?.user) {
           setUser(session.user)
-          const p = await fetchProfile(session.user.id)
+          const p = await fetchProfile(session.user)
           if (mounted) {
             setProfile(p)
             setLoading(false)
@@ -91,22 +114,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signOut = async () => {
     try {
-      // Panggil signOut ke Supabase — ini trigger onAuthStateChange
-      // yang akan set user & profile ke null otomatis
       await supabase.auth.signOut({ scope: 'global' })
     } catch (err) {
-      // Kalau request gagal (misal offline), tetap bersihkan state lokal
       console.warn('signOut error (handled):', err)
       setUser(null)
       setProfile(null)
     }
-    // Bersihkan hanya storage key Supabase, jangan localStorage.clear()
-    // karena itu bisa hapus data lain yang tidak berhubungan
     localStorage.removeItem('adsdash-auth-v2')
     sessionStorage.removeItem('adsdash-auth-v2')
-    // TIDAK pakai window.location.href = '/login'
-    // karena app ini SPA tanpa route /login — onAuthStateChange sudah
-    // menangani redirect ke LoginPage via kondisi !user di App.tsx
   }
 
   return (
