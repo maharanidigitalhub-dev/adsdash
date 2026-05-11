@@ -438,7 +438,34 @@ export default function UpdateSettingTab() {
                 return (
                   <tr key={c.id} className="row-hover" style={{ background: 'transparent', transition: 'background .15s' }}>
                     <td style={tdStyle}><span style={{ fontWeight: 500 }}>{c.campaign_name}</span></td>
-                    <td style={tdStyle}><PlatformBadge name={c.platform_name} /></td>
+                    <td style={tdStyle}>
+  <select
+    value={c.platform_name}
+    onChange={async e => {
+      const newPlatform = e.target.value
+      const { data: platformData } = await supabase
+        .from('dim_platforms')
+        .select('platform_id')
+        .eq('platform_name', newPlatform)
+        .single()
+      if (!platformData) return
+      setCampaigns(prev => prev.map(x => x.id === c.id ? { ...x, platform_name: newPlatform } : x))
+      await supabase.from('dim_campaigns').update({ platform_id: platformData.platform_id }).eq('campaign_id', c.id)
+      showToast(`Platform diubah ke "${newPlatform}".`)
+    }}
+    style={{
+      fontSize: 10, padding: '3px 8px', borderRadius: 99, fontWeight: 600,
+      background: PLATFORM_STYLE[c.platform_name]?.bg || '#f0f0f0',
+      color: PLATFORM_STYLE[c.platform_name]?.color || '#555',
+      border: `1px solid ${PLATFORM_STYLE[c.platform_name]?.bg || '#ccc'}`,
+      cursor: 'pointer', outline: 'none', appearance: 'none',
+      paddingRight: 20,
+    }}
+  >
+    {PLATFORM_LIST.map(p => <option key={p} value={p}>{p}</option>)}
+  </select>
+</td>
+
                     <td style={{ ...tdStyle, color: '#555' }}>{c.objective}</td>
                     <td style={tdStyle}>
                       <StatusCycleButton status={c.status} saving={isSaving} onChange={newStatus => handleStatusChange(c.id, newStatus)} />
