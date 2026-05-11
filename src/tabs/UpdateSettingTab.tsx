@@ -304,25 +304,28 @@ export default function UpdateSettingTab() {
   const handleDelete = async () => {
   if (!deleteId) return
   setDeleting(true)
-
-  const { error } = await supabase
+  
+  console.log('Deleting campaign_id:', deleteId)
+  
+  const { data, error } = await supabase
     .from('dim_campaigns')
     .delete()
     .eq('campaign_id', deleteId)
-
+    .select()
+  
+  console.log('Delete result:', data, 'Error:', error)
+  
   if (error) {
-    showToast('Gagal menghapus campaign.', 'error')
-    console.error('Delete error:', error)
+    showToast('Gagal menghapus: ' + error.message, 'error')
   } else {
-    // Update state lokal dulu
     setCampaigns(prev => prev.filter(c => c.id !== deleteId))
     showToast('Campaign berhasil dihapus.')
   }
-
   setDeleting(false)
   setDeleteId(null)
   setDeleteName('')
 }
+
 
 
   const handleEditSaved = (updated: Campaign) => {
