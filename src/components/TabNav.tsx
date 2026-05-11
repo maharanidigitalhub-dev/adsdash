@@ -12,7 +12,7 @@ export default function TabNav({ activeTab, onTabChange, role }: Props) {
   const tabs = [
     { id: 'overview' as Tab, label: 'Overview' },
     { id: 'campaign' as Tab, label: 'Campaign' },
-    { id: 'creative' as Tab, label: 'Creative' },
+    //{ id: 'creative' as Tab, label: 'Creative' },
     //{ id: 'audience' as Tab, label: 'Audience' },
     { id: 'budget' as Tab, label: 'Budget' },
     { id: 'conversion' as Tab, label: 'Conversion / ROAS' },
