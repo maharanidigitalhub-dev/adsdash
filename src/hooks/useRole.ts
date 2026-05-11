@@ -1,21 +1,24 @@
-// src/hooks/useRole.ts
 import { useAuth } from '../contexts/AuthContext'
-import type { UserRole } from '../types'
 
 export function useRole() {
-  const {
-    role, isSuperadmin, isManager, isStaff,
-    canManageUsers, canImportData, profile,
-  } = useAuth()
+  const { user, profile, loading, signOut } = useAuth()
+
+  const role = profile?.role ?? null
+  const isSuperadmin = role === 'founder'
+  const isManager = role === 'founder' || role === 'admin'
+  const isStaff = !!user
 
   return {
     role,
-    isSuperadmin,  // founder
-    isManager,     // founder + admin
-    isStaff,       // semua yang login
-    canManageUsers,
-    canImportData,
+    isSuperadmin,
+    isManager,
+    isStaff,
+    canManageUsers: isSuperadmin,
+    canImportData: isManager,
     profile,
-    showFor: (roles: UserRole[]) => role !== null && roles.includes(role),
+    user,
+    loading,
+    signOut,
+    showFor: (roles: string[]) => role !== null && roles.includes(role),
   }
 }
