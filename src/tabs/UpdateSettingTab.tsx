@@ -31,6 +31,7 @@ const STATUS_STYLE: Record<string, { bg: string; color: string; border: string }
 const STATUS_OPTIONS = ['Active', 'Paused', 'Ended']
 const PLATFORM_OPTIONS = ['All', 'Meta', 'Google', 'TikTok']
 const STATUS_FILTER_OPTIONS = ['All', 'Active', 'Paused', 'Ended']
+const PLATFORM_LIST = ['Meta', 'Google', 'TikTok']
 
 const OBJECTIVES = [
   'Awareness', 'Reach', 'Traffic', 'Engagement',
@@ -67,7 +68,7 @@ function LoadingRow() {
     <tr>
       {Array.from({ length: 9 }).map((_, i) => (
         <td key={i} style={{ padding: '10px 12px' }}>
-          <div style={{ height: 12, borderRadius: 4, background: 'linear-gradient(90deg,#f0f0f0 25%,#e8e8e8 50%,#f0f0f0 75%)', backgroundSize: '200% 100%', animation: 'shimmer 1.4s infinite', width: i === 0 ? 140 : i === 8 ? 60 : 70 }} />
+          <div style={{ height: 12, borderRadius: 4, background: 'linear-gradient(90deg,#f0f0f0 25%,#e8e8e8 50%,#f0f0f0 75%)', backgroundSize: '200% 100%', animation: 'shimmer 1.4s infinite', width: i === 0 ? 140 : 70 }} />
         </td>
       ))}
     </tr>
@@ -82,7 +83,7 @@ function StatusCycleButton({ status, saving, onChange }: { status: string; savin
   }
   return (
     <button onClick={next} disabled={saving} title="Click to change status"
-      style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 10px', borderRadius: 99, fontSize: 10, fontWeight: 600, background: s.bg, color: s.color, border: `1px solid ${s.border}`, cursor: saving ? 'not-allowed' : 'pointer', opacity: saving ? 0.6 : 1, transition: 'all .15s', userSelect: 'none', pointerEvents: saving ? 'none' : 'auto' }}>
+      style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 10px', borderRadius: 99, fontSize: 10, fontWeight: 600, background: s.bg, color: s.color, border: `1px solid ${s.border}`, cursor: saving ? 'not-allowed' : 'pointer', opacity: saving ? 0.6 : 1, transition: 'all .15s', userSelect: 'none' }}>
       {saving ? '…' : status}
       {!saving && (
         <svg width="7" height="7" viewBox="0 0 10 10" fill="none" style={{ flexShrink: 0 }}>
@@ -96,6 +97,7 @@ function StatusCycleButton({ status, saving, onChange }: { status: string; savin
 function EditModal({ campaign, onClose, onSaved }: { campaign: Campaign; onClose: () => void; onSaved: (updated: Campaign) => void }) {
   const [form, setForm] = useState({
     campaign_name: campaign.campaign_name,
+    platform_name: campaign.platform_name,
     objective: campaign.objective,
     status: campaign.status,
     daily_budget: campaign.daily_budget?.toString() ?? '',
@@ -112,8 +114,16 @@ function EditModal({ campaign, onClose, onSaved }: { campaign: Campaign; onClose
     if (!form.campaign_name.trim()) { setError('Nama campaign wajib diisi.'); return }
     setSaving(true); setError('')
 
+    // Cari platform_id dari platform_name
+    const { data: platformData } = await supabase
+      .from('dim_platforms')
+      .select('platform_id')
+      .eq('platform_name', form.platform_name)
+      .single()
+
     const payload = {
       campaign_name: form.campaign_name.trim(),
+      platform_id: platformData?.platform_id ?? campaign.platform_id,
       objective: form.objective,
       status: form.status,
       daily_budget: form.daily_budget ? parseFloat(form.daily_budget) : null,
@@ -130,7 +140,7 @@ function EditModal({ campaign, onClose, onSaved }: { campaign: Campaign; onClose
       .eq('campaign_id', campaign.id)
 
     if (err) { setError(err.message); setSaving(false); return }
-    onSaved({ ...campaign, ...payload })
+    onSaved({ ...campaign, ...payload, platform_name: form.platform_name })
     setSaving(false)
     onClose()
   }
@@ -150,24 +160,39 @@ function EditModal({ campaign, onClose, onSaved }: { campaign: Campaign; onClose
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {/* Campaign Name */}
           <div>
             <label style={lbl}>Nama Campaign *</label>
             <input value={form.campaign_name} onChange={e => setForm(f => ({ ...f, campaign_name: e.target.value }))} style={f} />
           </div>
+
+          {/* Platform + Status */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <div>
-              <label style={lbl}>Objective</label>
-              <select value={form.objective} onChange={e => setForm(f => ({ ...f, objective: e.target.value }))} style={f}>
-                {OBJECTIVES.map(o => <option key={o} value={o}>{o}</option>)}
+              <label style={lbl}>Platform</label>
+              <select value={form.platform_name} onChange={e => setForm(f => ({ ...f, platform_name: e.target.value }))}
+                style={{ ...f, background: PLATFORM_STYLE[form.platform_name]?.bg || '#fafafa', color: PLATFORM_STYLE[form.platform_name]?.color || '#1a1a1a' }}>
+                {PLATFORM_LIST.map(p => <option key={p} value={p}>{p}</option>)}
               </select>
             </div>
             <div>
               <label style={lbl}>Status</label>
-              <select value={form.status} onChange={e => setForm(f => ({ ...f, status: e.target.value }))} style={{ ...f, background: STATUS_STYLE[form.status]?.bg || '#fafafa', color: STATUS_STYLE[form.status]?.color || '#1a1a1a' }}>
+              <select value={form.status} onChange={e => setForm(f => ({ ...f, status: e.target.value }))}
+                style={{ ...f, background: STATUS_STYLE[form.status]?.bg || '#fafafa', color: STATUS_STYLE[form.status]?.color || '#1a1a1a' }}>
                 {STATUS_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
               </select>
             </div>
           </div>
+
+          {/* Objective */}
+          <div>
+            <label style={lbl}>Objective</label>
+            <select value={form.objective} onChange={e => setForm(f => ({ ...f, objective: e.target.value }))} style={f}>
+              {OBJECTIVES.map(o => <option key={o} value={o}>{o}</option>)}
+            </select>
+          </div>
+
+          {/* Budget */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <div>
               <label style={lbl}>Daily Budget (Rp)</label>
@@ -178,6 +203,8 @@ function EditModal({ campaign, onClose, onSaved }: { campaign: Campaign; onClose
               <input type="number" value={form.lifetime_budget} onChange={e => setForm(f => ({ ...f, lifetime_budget: e.target.value }))} style={f} placeholder="e.g. 5000000" />
             </div>
           </div>
+
+          {/* Target ROAS + CPA */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <div>
               <label style={lbl}>Target ROAS (x)</label>
@@ -188,6 +215,8 @@ function EditModal({ campaign, onClose, onSaved }: { campaign: Campaign; onClose
               <input type="number" value={form.target_cpa} onChange={e => setForm(f => ({ ...f, target_cpa: e.target.value }))} style={f} placeholder="e.g. 25000" />
             </div>
           </div>
+
+          {/* Period */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <div>
               <label style={lbl}>Start Date</label>
@@ -244,7 +273,7 @@ export default function UpdateSettingTab() {
       id: row.campaign_id,
       campaign_name: row.campaign_name,
       platform_id: row.platform_id,
-      platform_name: row.dim_platforms?.platform_name ?? '—',
+      platform_name: Array.isArray(row.dim_platforms) ? row.dim_platforms[0]?.platform_name : row.dim_platforms?.platform_name ?? '—',
       objective: row.objective ?? '—',
       status: row.status ?? 'Active',
       daily_budget: row.daily_budget,
@@ -275,9 +304,24 @@ export default function UpdateSettingTab() {
   const handleDelete = async () => {
     if (!deleteId) return
     setDeleting(true)
+
+    // Hapus fact_daily_performance dulu (foreign key)
+    await supabase.from('fact_daily_performance').delete().eq('campaign_id', deleteId)
+
+    // Hapus dim_ads
+    await supabase.from('dim_ads').delete().eq('campaign_id', deleteId)
+
+    // Hapus dim_adsets
+    await supabase.from('dim_adsets').delete().eq('campaign_id', deleteId)
+
+    // Hapus campaign
     const { error } = await supabase.from('dim_campaigns').delete().eq('campaign_id', deleteId)
+
     if (error) showToast('Gagal menghapus campaign.', 'error')
-    else { showToast('Campaign berhasil dihapus.'); setCampaigns(prev => prev.filter(c => c.id !== deleteId)) }
+    else {
+      showToast('Campaign berhasil dihapus.')
+      setCampaigns(prev => prev.filter(c => c.id !== deleteId))
+    }
     setDeleting(false); setDeleteId(null); setDeleteName('')
   }
 
@@ -318,15 +362,18 @@ export default function UpdateSettingTab() {
       {/* Delete Modal */}
       {deleteId && (
         <div style={{ position: 'fixed', inset: 0, zIndex: 9000, background: 'rgba(0,0,0,0.35)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }} onClick={() => { if (!deleting) { setDeleteId(null); setDeleteName('') } }}>
-          <div style={{ background: '#fff', borderRadius: 12, padding: '24px 28px', minWidth: 300, maxWidth: 380, boxShadow: '0 8px 32px rgba(0,0,0,0.14)' }} onClick={e => e.stopPropagation()}>
+          <div style={{ background: '#fff', borderRadius: 12, padding: '24px 28px', minWidth: 300, maxWidth: 400, boxShadow: '0 8px 32px rgba(0,0,0,0.14)' }} onClick={e => e.stopPropagation()}>
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Hapus Campaign</div>
-            <div style={{ fontSize: 12, color: '#555', marginBottom: 20, lineHeight: 1.6 }}>
-              Hapus <strong>{deleteName}</strong>? Tindakan ini tidak dapat dibatalkan.
+            <div style={{ fontSize: 12, color: '#555', marginBottom: 6, lineHeight: 1.6 }}>
+              Hapus <strong>{deleteName}</strong>?
+            </div>
+            <div style={{ fontSize: 11, color: '#A32D2D', background: '#FCEBEB', borderRadius: 6, padding: '6px 10px', marginBottom: 20 }}>
+              ⚠ Semua data performa terkait campaign ini juga akan dihapus permanen.
             </div>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
               <button onClick={() => { setDeleteId(null); setDeleteName('') }} disabled={deleting} style={{ padding: '7px 14px', fontSize: 12, borderRadius: 6, border: '0.5px solid rgba(0,0,0,0.18)', background: '#fff', color: '#555', cursor: 'pointer', fontWeight: 500 }}>Batal</button>
               <button onClick={handleDelete} disabled={deleting} style={{ padding: '7px 16px', fontSize: 12, borderRadius: 6, border: 'none', background: '#A32D2D', color: '#fff', cursor: deleting ? 'not-allowed' : 'pointer', fontWeight: 600, opacity: deleting ? 0.7 : 1 }}>
-                {deleting ? 'Menghapus…' : 'Ya, Hapus'}
+                {deleting ? 'Menghapus…' : 'Ya, Hapus Permanen'}
               </button>
             </div>
           </div>
@@ -340,7 +387,7 @@ export default function UpdateSettingTab() {
             <div style={{ fontSize: 13, fontWeight: 600, color: '#1a1a1a' }}>Campaign Settings</div>
             <div style={{ fontSize: 11, color: '#888', marginTop: 2 }}>Manage status and review campaign configuration</div>
           </div>
-          <button onClick={fetchCampaigns} disabled={loading} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 14px', fontSize: 12, borderRadius: 6, border: '0.5px solid rgba(0,0,0,0.18)', background: '#fff', color: '#1a1a1a', cursor: loading ? 'not-allowed' : 'pointer', fontWeight: 500, opacity: loading ? 0.6 : 1 }}>
+          <button onClick={fetchCampaigns} disabled={loading} style={{ padding: '7px 14px', fontSize: 12, borderRadius: 6, border: '0.5px solid rgba(0,0,0,0.18)', background: '#fff', color: '#1a1a1a', cursor: loading ? 'not-allowed' : 'pointer', fontWeight: 500, opacity: loading ? 0.6 : 1 }}>
             Refresh
           </button>
         </div>
@@ -402,14 +449,14 @@ export default function UpdateSettingTab() {
                     <td style={{ ...tdStyle, color: '#555', whiteSpace: 'nowrap' }}>{formatPeriod(c.start_date, c.end_date)}</td>
                     <td style={{ ...tdStyle, textAlign: 'center' }}>
                       <div style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
-                        <button className="edit-btn" onClick={() => setEditCampaign(c)} title="Edit campaign"
-                          style={{ padding: '5px 7px', borderRadius: 6, border: 'none', background: 'transparent', cursor: 'pointer', color: '#bbb', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', transition: 'color .15s, background .15s', WebkitTapHighlightColor: 'transparent', touchAction: 'manipulation' }}>
+                        <button className="edit-btn" onClick={() => setEditCampaign(c)}
+                          style={{ padding: '5px 7px', borderRadius: 6, border: 'none', background: 'transparent', cursor: 'pointer', color: '#bbb', display: 'inline-flex', alignItems: 'center', transition: 'color .15s, background .15s' }}>
                           <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
                             <path d="M11.5 2.5a1.5 1.5 0 0 1 2.121 2.121L5 13.243 2 14l.757-3L11.5 2.5z" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
                           </svg>
                         </button>
-                        <button className="del-btn" onClick={() => confirmDelete(c.id, c.campaign_name)} title="Delete campaign"
-                          style={{ padding: '5px 7px', borderRadius: 6, border: 'none', background: 'transparent', cursor: 'pointer', color: '#bbb', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', transition: 'color .15s, background .15s', WebkitTapHighlightColor: 'transparent', touchAction: 'manipulation' }}>
+                        <button className="del-btn" onClick={() => confirmDelete(c.id, c.campaign_name)}
+                          style={{ padding: '5px 7px', borderRadius: 6, border: 'none', background: 'transparent', cursor: 'pointer', color: '#bbb', display: 'inline-flex', alignItems: 'center', transition: 'color .15s, background .15s' }}>
                           <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
                             <path d="M3 4h10M6 4V3a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v1M5 4l.5 8.5a1 1 0 0 0 1 .5h3a1 1 0 0 0 1-.5L11 4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
                             <path d="M7 7v4M9 7v4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
