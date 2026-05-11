@@ -92,6 +92,29 @@ function Dashboard() {
 
     setDataLoading(false)
   }, [])
+  useEffect(() => {
+  if (!user) return
+  if (profile?.role === 'client' && profile?.client_id) {
+    setSelectedClient(profile.client_id)
+    fetchGlobalData(profile.client_id, filters)
+  } else {
+    fetchGlobalData('all', filters)
+  }
+
+  // Realtime subscription
+  const channel = supabase
+    .channel('db-changes')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'fact_daily_performance' }, () => {
+      fetchGlobalData(selectedClient, filters)
+    })
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'dim_campaigns' }, () => {
+      fetchGlobalData(selectedClient, filters)
+    })
+    .subscribe()
+
+  return () => { supabase.removeChannel(channel) }
+}, [user, profile])
+
 
   useEffect(() => {
     if (!user) return
