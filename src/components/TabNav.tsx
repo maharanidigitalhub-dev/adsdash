@@ -15,7 +15,7 @@ export default function TabNav({ activeTab, onTabChange, role }: Props) {
     //{ id: 'creative' as Tab, label: 'Creative' },
     //{ id: 'audience' as Tab, label: 'Audience' },
     { id: 'budget' as Tab, label: 'Budget' },
-    { id: 'conversion' as Tab, label: 'Conversion / ROAS' },
+    //{ id: 'conversion' as Tab, label: 'Conversion / ROAS' },
     ...(canAccessAdmin ? [
       { id: 'settings' as Tab, label: 'Ads Setting' },
       { id: 'campaigns' as Tab, label: 'Update Setting' },
