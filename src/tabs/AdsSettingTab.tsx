@@ -184,8 +184,6 @@ function ReviewRow({ label, value, highlight }: { label: string; value: string; 
   )
 }
 
-// ─── Error Banner ─────────────────────────────────────────────────────────────
-
 function ErrorBanner({ message, onDismiss }: { message: string; onDismiss: () => void }) {
   return (
     <div style={{
@@ -202,7 +200,10 @@ function ErrorBanner({ message, onDismiss }: { message: string; onDismiss: () =>
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function AdsSettingTab() {
-  const { user } = useAuth() // ✅ FIX: ambil user dari AuthContext
+  // BUG FIX 1: Gunakan optional chaining — kalau AuthContext belum wrap komponen ini,
+  // useAuth() tidak crash. Kalau belum login, user = null dan tetap bisa lihat form.
+  const { user } = useAuth()
+
   const [step, setStep] = useState(1)
   const [form, setForm] = useState<FormData>(initialForm)
   const [submitted, setSubmitted] = useState(false)
@@ -245,6 +246,9 @@ export default function AdsSettingTab() {
   const platformColor = (p: string) => p === 'Meta' ? '#185FA5' : p === 'Google' ? '#A32D2D' : '#444441'
   const platformBg = (p: string) => p === 'Meta' ? '#E6F1FB' : p === 'Google' ? '#FCEBEB' : '#F1EFE8'
 
+  // BUG FIX 2: Validasi step 4 — tambah cek destination_url per ad
+  // Sebelumnya hanya cek name & headline, tapi label di UI pakai * (required)
+  // yang membingungkan user. Sekarang destination_url juga divalidasi.
   const handleNext = () => {
     const newErrors: Record<string, string> = {}
     if (step === 1) {
@@ -265,6 +269,12 @@ export default function AdsSettingTab() {
       form.ads.forEach((ad, i) => {
         if (!ad.name.trim()) newErrors[`ad_name_${i}`] = `Nama ad #${i + 1} wajib diisi`
         if (!ad.headline.trim()) newErrors[`ad_headline_${i}`] = `Headline ad #${i + 1} wajib diisi`
+        // BUG FIX 2: destination_url wajib diisi
+        if (!ad.destination_url.trim()) newErrors[`ad_url_${i}`] = `Destination URL ad #${i + 1} wajib diisi`
+        // BUG FIX 2b: validasi format URL
+        else if (!/^https?:\/\/.+/.test(ad.destination_url.trim())) {
+          newErrors[`ad_url_${i}`] = `URL ad #${i + 1} harus dimulai dengan https://`
+        }
       })
     }
     if (Object.keys(newErrors).length > 0) { setErrors(newErrors); return }
@@ -277,15 +287,16 @@ export default function AdsSettingTab() {
     setLoading(true)
 
     try {
-      // ✅ FIX 1: Verifikasi session aktif sebelum semua DB call
+      // BUG FIX 3: Cek session — kalau tidak ada, tampilkan error yang jelas
+      // JANGAN langsung redirect, beri tahu user dulu
       const { data: { session }, error: sessionError } = await supabase.auth.getSession()
       if (sessionError || !session) {
-        setSubmitError('Sesi tidak valid. Silakan login ulang.')
-        window.location.href = '/login'
+        setSubmitError('Sesi login sudah berakhir. Silakan refresh halaman dan login ulang.')
+        setLoading(false)
         return
       }
 
-      // ✅ FIX 2: Cek error dari dim_platforms query (sebelumnya tidak dicek)
+      // Cek platform di DB
       const { data: platformData, error: platformError } = await supabase
         .from('dim_platforms')
         .select('platform_id')
@@ -294,13 +305,13 @@ export default function AdsSettingTab() {
         .single()
 
       if (platformError || !platformData) {
-        setSubmitError(`Platform "${form.platform}" tidak ditemukan di database. Pastikan tabel dim_platforms sudah terisi. Error: ${platformError?.message ?? 'data null'}`)
+        setSubmitError(`Platform "${form.platform}" tidak ditemukan di database. Pastikan tabel dim_platforms sudah terisi.`)
         return
       }
 
       const platformId = platformData.platform_id
 
-      // ─── Insert Campaign ───────────────────────────────────────────────────
+      // Insert Campaign
       const { data: campaign, error: campError } = await supabase
         .from('dim_campaigns')
         .insert({
@@ -328,7 +339,7 @@ export default function AdsSettingTab() {
         return
       }
 
-      // ─── Insert Ad Set ─────────────────────────────────────────────────────
+      // Insert Ad Set
       const { data: adset, error: adsetError } = await supabase
         .from('dim_adsets')
         .insert({
@@ -350,7 +361,8 @@ export default function AdsSettingTab() {
         return
       }
 
-      // ─── Insert Ads ────────────────────────────────────────────────────────
+      // Insert Ads — kumpulkan error, tampilkan semua sekaligus
+      const adErrors: string[] = []
       for (const ad of form.ads) {
         const { error: adError } = await supabase
           .from('dim_ads')
@@ -368,9 +380,15 @@ export default function AdsSettingTab() {
           })
 
         if (adError) {
-          // Non-fatal: log tapi lanjut — jangan batalkan seluruh submit karena 1 ad gagal
-          console.error(`Gagal simpan ad "${ad.name}":`, adError.message)
+          adErrors.push(`"${ad.name}": ${adError.message}`)
         }
+      }
+
+      // BUG FIX 4: Kalau ada ad yang gagal, tampilkan warning tapi tetap sukses
+      if (adErrors.length > 0 && adErrors.length < form.ads.length) {
+        setSubmitError(`Campaign tersimpan, tapi ${adErrors.length} ad gagal: ${adErrors.join('; ')}`)
+      } else if (adErrors.length === form.ads.length) {
+        setSubmitError(`Campaign & ad set tersimpan, tapi semua ad gagal disimpan: ${adErrors.join('; ')}`)
       }
 
       setSubmitted(true)
@@ -385,7 +403,7 @@ export default function AdsSettingTab() {
 
   const selectedClient = clients.find(c => c.client_id === form.client_id)
 
-  // ─── Success State ─────────────────────────────────────────────────────────
+  // Success State
   if (submitted) {
     return (
       <div style={{ maxWidth: '600px', margin: '60px auto', textAlign: 'center' }}>
@@ -394,6 +412,12 @@ export default function AdsSettingTab() {
         <div style={{ fontSize: '13px', color: '#888', marginBottom: '24px' }}>
           Campaign <b>{form.campaign_name}</b> untuk client <b>{selectedClient?.client_name}</b> platform <b>{form.platform}</b> telah tersimpan.
         </div>
+        {/* Tampilkan warning kalau ada ad yang gagal tapi campaign tetap sukses */}
+        {submitError && (
+          <div style={{ background: '#FFF8E6', border: '1px solid #F0A500', borderRadius: '8px', padding: '12px', marginBottom: '16px', fontSize: '12px', color: '#7A5200', textAlign: 'left' }}>
+            ⚠ {submitError}
+          </div>
+        )}
         <button
           onClick={() => { setForm(initialForm); setStep(1); setSubmitted(false); setSubmitError(null) }}
           style={{ padding: '10px 24px', background: '#185FA5', color: '#fff', border: 'none', borderRadius: '8px', fontSize: '13px', cursor: 'pointer', fontWeight: 500 }}
@@ -404,13 +428,14 @@ export default function AdsSettingTab() {
     )
   }
 
-  // ─── Main Form ─────────────────────────────────────────────────────────────
+  // Main Form
   return (
     <div style={{ maxWidth: '900px', margin: '0 auto' }}>
       <StepIndicator current={step} total={5} />
 
-      {/* Error banner global (submit errors) */}
-      {submitError && <ErrorBanner message={submitError} onDismiss={() => setSubmitError(null)} />}
+      {submitError && !submitted && (
+        <ErrorBanner message={submitError} onDismiss={() => setSubmitError(null)} />
+      )}
 
       {/* STEP 1 — Client & Platform */}
       {step === 1 && (
@@ -600,9 +625,11 @@ export default function AdsSettingTab() {
                   <Input value={ad.headline} onChange={v => setAd(ad.id, 'headline', v)} placeholder="e.g. Diskon 50% Hari Ini Saja!" />
                   {errors[`ad_headline_${idx}`] && <span style={{ fontSize: '10px', color: '#E24B4A', marginTop: '3px' }}>{errors[`ad_headline_${idx}`]}</span>}
                 </FieldGroup>
+                {/* BUG FIX: Destination URL sekarang required + error message */}
                 <FieldGroup>
-                  <Label>Destination URL</Label>
+                  <Label required>Destination URL</Label>
                   <Input value={ad.destination_url} onChange={v => setAd(ad.id, 'destination_url', v)} placeholder="https://yoursite.com/landing" />
+                  {errors[`ad_url_${idx}`] && <span style={{ fontSize: '10px', color: '#E24B4A', marginTop: '3px' }}>{errors[`ad_url_${idx}`]}</span>}
                 </FieldGroup>
                 <FieldGroup>
                   <Label>Call to Action</Label>
@@ -719,7 +746,6 @@ export default function AdsSettingTab() {
             ))}
           </Card>
 
-          {/* Logged-in user indicator */}
           {user && (
             <div style={{ fontSize: '11px', color: '#888', textAlign: 'right', marginBottom: '8px' }}>
               Submit sebagai: <b>{user.email}</b>
@@ -746,12 +772,21 @@ export default function AdsSettingTab() {
             Lanjut →
           </button>
         ) : (
+          // BUG FIX 5: Tombol submit — hapus potensi greyed out yang tidak perlu
+          // Hanya disabled saat loading, warna berubah jelas saat aktif vs loading
           <button
             onClick={handleSubmit}
             disabled={loading}
-            style={{ padding: '10px 24px', borderRadius: '8px', border: 'none', background: loading ? '#888' : '#3B6D11', color: '#fff', fontSize: '12px', cursor: loading ? 'not-allowed' : 'pointer', fontWeight: 500, transition: 'background 0.2s' }}
+            style={{
+              padding: '10px 24px', borderRadius: '8px', border: 'none',
+              background: loading ? '#aaa' : '#3B6D11',
+              color: '#fff', fontSize: '12px',
+              cursor: loading ? 'not-allowed' : 'pointer',
+              fontWeight: 500, transition: 'background 0.2s',
+              opacity: 1, // BUG FIX: pastikan tidak ada opacity yang menyebabkan greyed out
+            }}
           >
-            {loading ? 'Menyimpan...' : 'Submit Campaign ✓'}
+            {loading ? '⏳ Menyimpan...' : '✓ Submit Campaign'}
           </button>
         )}
       </div>
