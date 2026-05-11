@@ -1,14 +1,4 @@
-export type Tab =
-  | 'overview'
-  | 'campaign'
-  | 'creative'
-  | 'audience'
-  | 'budget'
-  | 'conversion'
-  | 'settings'
-  | 'campaigns'
-  | 'datainput'
-  | 'users'
+export type Tab = 'overview' | 'campaign' | 'creative' | 'audience' | 'budget' | 'conversion' | 'settings' | 'campaigns' | 'datainput' | 'users'
 
 export interface DailyRow {
   report_date: string
@@ -18,26 +8,23 @@ export interface DailyRow {
   conversions_7d_click: number
   conversion_value: number
   platform_name: string
-}
-
-export type PlatformFilter = 'All' | 'Meta' | 'Google' | 'TikTok'
-export type PeriodFilter = 'Last 7 days' | 'Last 30 days' | 'Custom'
-
-export interface DateRange {
-  from: string // YYYY-MM-DD
-  to: string   // YYYY-MM-DD
+  campaign_name?: string
+  campaign_id?: string
+  client_id?: string
 }
 
 export interface FilterState {
-  platform: PlatformFilter
-  period: PeriodFilter
-  dateRange: DateRange | null
+  platform: string
+  period: string
+  dateRange?: {
+    from: string
+    to: string
+  }
 }
 
 export interface GlobalData {
   rows: DailyRow[]
   loading: boolean
   refetch: () => void
-  // Filter yang aktif — dipakai semua tab untuk memfilter data
-  filters: FilterState
+  filters?: FilterState
 }
