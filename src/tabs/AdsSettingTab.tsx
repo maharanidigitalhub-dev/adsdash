@@ -189,10 +189,10 @@ function ErrorBanner({ message, onDismiss }: { message: string; onDismiss: () =>
     <div style={{
       background: '#FCEBEB', border: '1px solid #E24B4A', borderRadius: '8px',
       padding: '12px 16px', marginBottom: '16px', display: 'flex',
-      justifyContent: 'space-between', alignItems: 'center',
+      justifyContent: 'space-between', alignItems: 'flex-start',
     }}>
-      <span style={{ fontSize: '12px', color: '#A32D2D' }}>⚠ {message}</span>
-      <button onClick={onDismiss} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#A32D2D', fontSize: '14px', padding: '0 4px' }}>✕</button>
+      <span style={{ fontSize: '12px', color: '#A32D2D', whiteSpace: 'pre-wrap', flex: 1 }}>⚠ {message}</span>
+      <button onClick={onDismiss} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#A32D2D', fontSize: '14px', padding: '0 4px', marginLeft: '8px', flexShrink: 0 }}>✕</button>
     </div>
   )
 }
@@ -200,8 +200,6 @@ function ErrorBanner({ message, onDismiss }: { message: string; onDismiss: () =>
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function AdsSettingTab() {
-  // BUG FIX 1: Gunakan optional chaining — kalau AuthContext belum wrap komponen ini,
-  // useAuth() tidak crash. Kalau belum login, user = null dan tetap bisa lihat form.
   const { user } = useAuth()
 
   const [step, setStep] = useState(1)
@@ -246,9 +244,6 @@ export default function AdsSettingTab() {
   const platformColor = (p: string) => p === 'Meta' ? '#185FA5' : p === 'Google' ? '#A32D2D' : '#444441'
   const platformBg = (p: string) => p === 'Meta' ? '#E6F1FB' : p === 'Google' ? '#FCEBEB' : '#F1EFE8'
 
-  // BUG FIX 2: Validasi step 4 — tambah cek destination_url per ad
-  // Sebelumnya hanya cek name & headline, tapi label di UI pakai * (required)
-  // yang membingungkan user. Sekarang destination_url juga divalidasi.
   const handleNext = () => {
     const newErrors: Record<string, string> = {}
     if (step === 1) {
@@ -269,9 +264,7 @@ export default function AdsSettingTab() {
       form.ads.forEach((ad, i) => {
         if (!ad.name.trim()) newErrors[`ad_name_${i}`] = `Nama ad #${i + 1} wajib diisi`
         if (!ad.headline.trim()) newErrors[`ad_headline_${i}`] = `Headline ad #${i + 1} wajib diisi`
-        // BUG FIX 2: destination_url wajib diisi
         if (!ad.destination_url.trim()) newErrors[`ad_url_${i}`] = `Destination URL ad #${i + 1} wajib diisi`
-        // BUG FIX 2b: validasi format URL
         else if (!/^https?:\/\/.+/.test(ad.destination_url.trim())) {
           newErrors[`ad_url_${i}`] = `URL ad #${i + 1} harus dimulai dengan https://`
         }
@@ -282,36 +275,83 @@ export default function AdsSettingTab() {
     setStep(s => Math.min(5, s + 1))
   }
 
+  // ─── FIX UTAMA: handleSubmit yang robust ──────────────────────────────────
   const handleSubmit = async () => {
+    // Reset state sebelum mulai
     setSubmitError(null)
     setLoading(true)
 
     try {
-      // BUG FIX 3: Cek session — kalau tidak ada, tampilkan error yang jelas
-      // JANGAN langsung redirect, beri tahu user dulu
-      const { data: { session }, error: sessionError } = await supabase.auth.getSession()
-      if (sessionError || !session) {
-        setSubmitError('Sesi login sudah berakhir. Silakan refresh halaman dan login ulang.')
-        setLoading(false)
-        return
+      // ── FIX 1: Cek session dengan fallback ke getUser() ──
+      // getSession() bisa return null kalau token expired tapi masih ada di storage.
+      // getUser() melakukan verifikasi ke server, lebih reliable.
+      let userId: string | null = null
+
+      const { data: { session } } = await supabase.auth.getSession()
+
+      if (session?.user?.id) {
+        userId = session.user.id
+      } else {
+        // Fallback: coba getUser() langsung ke server
+        const { data: { user: serverUser }, error: userError } = await supabase.auth.getUser()
+        if (userError || !serverUser) {
+          setSubmitError(
+            'Sesi login tidak ditemukan.\n\n' +
+            'Solusi: Refresh halaman (Ctrl+R / Cmd+R) dan login ulang, lalu coba submit kembali.'
+          )
+          return
+        }
+        userId = serverUser.id
       }
 
-      // Cek platform di DB
+      console.log('[Submit] User ID:', userId)
+      console.log('[Submit] Form data:', { platform: form.platform, client_id: form.client_id, campaign_name: form.campaign_name })
+
+      // ── FIX 2: Cek platform — gunakan ilike agar case-insensitive ──
+      // Bug potensial: nama platform di DB tidak cocok (case, spasi, dll.)
       const { data: platformData, error: platformError } = await supabase
         .from('dim_platforms')
-        .select('platform_id')
-        .eq('platform_name', form.platform)
+        .select('platform_id, platform_name')
+        .ilike('platform_name', form.platform)  // ← ilike, bukan eq, lebih toleran
         .eq('is_active', true)
-        .single()
+        .maybeSingle()  // ← maybeSingle() tidak throw error kalau 0 rows, beda dengan .single()
 
-      if (platformError || !platformData) {
-        setSubmitError(`Platform "${form.platform}" tidak ditemukan di database. Pastikan tabel dim_platforms sudah terisi.`)
+      console.log('[Submit] Platform lookup:', { platformData, platformError })
+
+      // ── FIX 3: Kalau platform tidak ada di DB, buat dulu secara otomatis ──
+      let platformId: string
+
+      if (platformError) {
+        setSubmitError(`Error saat cek platform: ${platformError.message}`)
         return
       }
 
-      const platformId = platformData.platform_id
+      if (!platformData) {
+        // Platform belum ada di dim_platforms — insert otomatis
+        console.log('[Submit] Platform tidak ditemukan, mencoba insert...')
+        const { data: newPlatform, error: insertPlatformError } = await supabase
+          .from('dim_platforms')
+          .insert({ platform_name: form.platform, is_active: true })
+          .select('platform_id')
+          .single()
 
-      // Insert Campaign
+        if (insertPlatformError || !newPlatform) {
+          setSubmitError(
+            `Platform "${form.platform}" tidak ditemukan di tabel dim_platforms dan gagal dibuat otomatis.\n\n` +
+            `Error: ${insertPlatformError?.message ?? 'data null'}\n\n` +
+            `Solusi: Tambahkan data platform di tabel dim_platforms lewat Supabase dashboard.`
+          )
+          return
+        }
+        platformId = newPlatform.platform_id
+        console.log('[Submit] Platform baru dibuat, ID:', platformId)
+      } else {
+        platformId = platformData.platform_id
+        console.log('[Submit] Platform ditemukan, ID:', platformId)
+      }
+
+      // ── Insert Campaign ──
+      console.log('[Submit] Inserting campaign...')
       const { data: campaign, error: campError } = await supabase
         .from('dim_campaigns')
         .insert({
@@ -335,11 +375,20 @@ export default function AdsSettingTab() {
         .single()
 
       if (campError || !campaign) {
-        setSubmitError(`Gagal menyimpan campaign: ${campError?.message ?? 'data null'}`)
+        console.error('[Submit] Campaign error:', campError)
+        setSubmitError(
+          `Gagal menyimpan campaign.\n\n` +
+          `Error: ${campError?.message ?? 'data null'}\n` +
+          `Code: ${campError?.code ?? '-'}\n\n` +
+          `Cek: apakah kolom di tabel dim_campaigns sudah sesuai? Atau ada RLS policy yang memblokir?`
+        )
         return
       }
 
-      // Insert Ad Set
+      console.log('[Submit] Campaign berhasil, ID:', campaign.campaign_id)
+
+      // ── Insert Ad Set ──
+      console.log('[Submit] Inserting adset...')
       const { data: adset, error: adsetError } = await supabase
         .from('dim_adsets')
         .insert({
@@ -357,13 +406,21 @@ export default function AdsSettingTab() {
         .single()
 
       if (adsetError || !adset) {
-        setSubmitError(`Gagal menyimpan ad set: ${adsetError?.message ?? 'data null'}`)
+        console.error('[Submit] Adset error:', adsetError)
+        setSubmitError(
+          `Campaign tersimpan (ID: ${campaign.campaign_id}), tapi gagal menyimpan ad set.\n\n` +
+          `Error: ${adsetError?.message ?? 'data null'}\n` +
+          `Code: ${adsetError?.code ?? '-'}`
+        )
         return
       }
 
-      // Insert Ads — kumpulkan error, tampilkan semua sekaligus
+      console.log('[Submit] Adset berhasil, ID:', adset.adset_id)
+
+      // ── Insert Ads ──
       const adErrors: string[] = []
       for (const ad of form.ads) {
+        console.log('[Submit] Inserting ad:', ad.name)
         const { error: adError } = await supabase
           .from('dim_ads')
           .insert({
@@ -380,21 +437,28 @@ export default function AdsSettingTab() {
           })
 
         if (adError) {
-          adErrors.push(`"${ad.name}": ${adError.message}`)
+          console.error('[Submit] Ad error:', ad.name, adError)
+          adErrors.push(`"${ad.name}": ${adError.message} (${adError.code})`)
         }
       }
 
-      // BUG FIX 4: Kalau ada ad yang gagal, tampilkan warning tapi tetap sukses
-      if (adErrors.length > 0 && adErrors.length < form.ads.length) {
-        setSubmitError(`Campaign tersimpan, tapi ${adErrors.length} ad gagal: ${adErrors.join('; ')}`)
-      } else if (adErrors.length === form.ads.length) {
-        setSubmitError(`Campaign & ad set tersimpan, tapi semua ad gagal disimpan: ${adErrors.join('; ')}`)
+      // ── Selesai ──
+      // FIX: setSubmitted(true) hanya dipanggil sekali di sini, SETELAH semua proses selesai.
+      // submitError untuk warning (partial failure) di-set SEBELUM setSubmitted agar bisa
+      // ditampilkan di success screen — TIDAK memblokir success.
+      if (adErrors.length > 0) {
+        const partialMsg =
+          adErrors.length === form.ads.length
+            ? `Campaign & ad set tersimpan, tapi semua ${adErrors.length} ad gagal:\n${adErrors.join('\n')}`
+            : `Campaign tersimpan, tapi ${adErrors.length} dari ${form.ads.length} ad gagal:\n${adErrors.join('\n')}`
+        setSubmitError(partialMsg)
       }
 
       setSubmitted(true)
 
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
+      console.error('[Submit] Unexpected error:', err)
       setSubmitError(`Terjadi kesalahan tidak terduga: ${msg}`)
     } finally {
       setLoading(false)
@@ -403,7 +467,7 @@ export default function AdsSettingTab() {
 
   const selectedClient = clients.find(c => c.client_id === form.client_id)
 
-  // Success State
+  // ─── Success State ────────────────────────────────────────────────────────
   if (submitted) {
     return (
       <div style={{ maxWidth: '600px', margin: '60px auto', textAlign: 'center' }}>
@@ -412,9 +476,8 @@ export default function AdsSettingTab() {
         <div style={{ fontSize: '13px', color: '#888', marginBottom: '24px' }}>
           Campaign <b>{form.campaign_name}</b> untuk client <b>{selectedClient?.client_name}</b> platform <b>{form.platform}</b> telah tersimpan.
         </div>
-        {/* Tampilkan warning kalau ada ad yang gagal tapi campaign tetap sukses */}
         {submitError && (
-          <div style={{ background: '#FFF8E6', border: '1px solid #F0A500', borderRadius: '8px', padding: '12px', marginBottom: '16px', fontSize: '12px', color: '#7A5200', textAlign: 'left' }}>
+          <div style={{ background: '#FFF8E6', border: '1px solid #F0A500', borderRadius: '8px', padding: '12px', marginBottom: '16px', fontSize: '12px', color: '#7A5200', textAlign: 'left', whiteSpace: 'pre-wrap' }}>
             ⚠ {submitError}
           </div>
         )}
@@ -428,11 +491,12 @@ export default function AdsSettingTab() {
     )
   }
 
-  // Main Form
+  // ─── Main Form ────────────────────────────────────────────────────────────
   return (
     <div style={{ maxWidth: '900px', margin: '0 auto' }}>
       <StepIndicator current={step} total={5} />
 
+      {/* Error banner — selalu tampil di atas kalau ada error dan belum submitted */}
       {submitError && !submitted && (
         <ErrorBanner message={submitError} onDismiss={() => setSubmitError(null)} />
       )}
@@ -625,7 +689,6 @@ export default function AdsSettingTab() {
                   <Input value={ad.headline} onChange={v => setAd(ad.id, 'headline', v)} placeholder="e.g. Diskon 50% Hari Ini Saja!" />
                   {errors[`ad_headline_${idx}`] && <span style={{ fontSize: '10px', color: '#E24B4A', marginTop: '3px' }}>{errors[`ad_headline_${idx}`]}</span>}
                 </FieldGroup>
-                {/* BUG FIX: Destination URL sekarang required + error message */}
                 <FieldGroup>
                   <Label required>Destination URL</Label>
                   <Input value={ad.destination_url} onChange={v => setAd(ad.id, 'destination_url', v)} placeholder="https://yoursite.com/landing" />
@@ -754,7 +817,7 @@ export default function AdsSettingTab() {
         </>
       )}
 
-      {/* Navigation */}
+      {/* ─── Navigation ─── */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '20px', paddingTop: '16px', borderTop: '0.5px solid rgba(0,0,0,0.08)' }}>
         <button
           onClick={() => setStep(s => Math.max(1, s - 1))}
@@ -772,18 +835,17 @@ export default function AdsSettingTab() {
             Lanjut →
           </button>
         ) : (
-          // BUG FIX 5: Tombol submit — hapus potensi greyed out yang tidak perlu
-          // Hanya disabled saat loading, warna berubah jelas saat aktif vs loading
           <button
             onClick={handleSubmit}
             disabled={loading}
             style={{
-              padding: '10px 24px', borderRadius: '8px', border: 'none',
-              background: loading ? '#aaa' : '#3B6D11',
+              padding: '10px 28px', borderRadius: '8px', border: 'none',
+              background: loading ? '#888' : '#3B6D11',
               color: '#fff', fontSize: '12px',
               cursor: loading ? 'not-allowed' : 'pointer',
-              fontWeight: 500, transition: 'background 0.2s',
-              opacity: 1, // BUG FIX: pastikan tidak ada opacity yang menyebabkan greyed out
+              fontWeight: 500,
+              minWidth: '160px',
+              transition: 'background 0.2s',
             }}
           >
             {loading ? '⏳ Menyimpan...' : '✓ Submit Campaign'}
