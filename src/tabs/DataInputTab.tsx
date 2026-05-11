@@ -125,12 +125,14 @@ export default function DataInputTab() {
   const [newClient, setNewClient] = useState({ name: '', business_type: '', contact_email: '', contact_phone: '' })
   const [savingClient, setSavingClient] = useState(false)
 
-  // CSV state
   const [csvFile, setCsvFile] = useState<File | null>(null)
   const [csvData, setCsvData] = useState<CsvRow[]>([])
   const [csvPreview, setCsvPreview] = useState<{ matched: number; unmatched: string[]; rows: CsvRow[] }>({ matched: 0, unmatched: [], rows: [] })
   const [loadingCsv, setLoadingCsv] = useState(false)
   const [analyzingCsv, setAnalyzingCsv] = useState(false)
+
+  // CSV import: pilih client untuk auto-create campaign
+  const [csvClientId, setCsvClientId] = useState('')
 
   useEffect(() => { fetchClients(); fetchRecentData() }, [])
 
@@ -218,7 +220,6 @@ export default function DataInputTab() {
     setLoadingSubmit(false)
   }
 
-  // Parse CSV file
   const parseCsv = (text: string): CsvRow[] => {
     const lines = text.trim().split('\n')
     const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, '').toLowerCase())
@@ -230,7 +231,6 @@ export default function DataInputTab() {
     }).filter(row => Object.values(row).some(v => v !== ''))
   }
 
-  // Handle file upload — langsung analisis, tidak perlu pilih client/campaign manual
   const handleCsvUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
@@ -245,44 +245,27 @@ export default function DataInputTab() {
       const rows = parseCsv(text)
       setCsvData(rows)
 
-      // Analisis: cek campaign_name & client_name di CSV, cocokkan dengan DB
       const campaignNames = [...new Set(rows.map(r => r.campaign_name).filter(Boolean))]
-      const clientNames = [...new Set(rows.map(r => r.client_name).filter(Boolean))]
       const unmatched: string[] = []
 
-      // Fetch semua campaigns & clients untuk matching
       const { data: allCampaigns } = await supabase
         .from('dim_campaigns')
-        .select('campaign_id, campaign_name, client_id, dim_platforms(platform_name)')
+        .select('campaign_id, campaign_name')
 
-      const { data: allClients } = await supabase
-        .from('dim_clients')
-        .select('client_id, client_name')
-
-      // Cek campaign yang tidak ditemukan di DB
       campaignNames.forEach(name => {
         const found = allCampaigns?.find(c => c.campaign_name?.toLowerCase() === name?.toLowerCase())
-        if (!found) unmatched.push(`Campaign tidak ditemukan: "${name}"`)
+        if (!found) unmatched.push(`Campaign baru akan dibuat: "${name}"`)
       })
 
-      // Cek client yang tidak ditemukan di DB (kalau ada kolom client_name)
-      if (clientNames.length > 0) {
-        clientNames.forEach(name => {
-          const found = allClients?.find(c => c.client_name?.toLowerCase() === name?.toLowerCase())
-          if (!found) unmatched.push(`Client tidak ditemukan: "${name}"`)
-        })
-      }
-
-      const matched = rows.length - (unmatched.length > 0 ? Math.min(unmatched.length * 5, rows.length) : 0)
       setCsvPreview({ matched: rows.length, unmatched, rows: rows.slice(0, 5) })
       setAnalyzingCsv(false)
     }
     reader.readAsText(file)
   }
 
-  // Import CSV — auto-match campaign & client dari DB berdasarkan nama di CSV
   const handleCsvImport = async () => {
     if (csvData.length === 0) { setErrorMsg('Tidak ada data CSV'); return }
+    if (!csvClientId) { setErrorMsg('Pilih client untuk import CSV ini'); return }
     setLoadingCsv(true)
     setErrorMsg('')
     setSuccessMsg('')
@@ -290,59 +273,72 @@ export default function DataInputTab() {
     // Fetch semua referensi
     const { data: allCampaigns } = await supabase
       .from('dim_campaigns')
-      .select('campaign_id, campaign_name, client_id, platform_id, dim_platforms(platform_name)')
-
-    const { data: allClients } = await supabase
-      .from('dim_clients')
-      .select('client_id, client_name')
+      .select('campaign_id, campaign_name, client_id, platform_id')
 
     const { data: allPlatforms } = await supabase
       .from('dim_platforms')
       .select('platform_id, platform_name')
 
+    // Cache campaign yang sudah dibuat dalam sesi ini
+    const campaignCache: Record<string, string> = {}
+
+    // Pre-populate cache dari DB
+    allCampaigns?.forEach(c => {
+      campaignCache[c.campaign_name?.toLowerCase()] = c.campaign_id
+    })
+
     const errors: string[] = []
     const rowsToInsert: Record<string, unknown>[] = []
 
     for (const row of csvData) {
-      const campaignName = row.campaign_name || ''
-      const clientName = row.client_name || ''
-      const platformName = row.platform || ''
-
-      // Match campaign by name
-      const campaign = allCampaigns?.find(c =>
-        c.campaign_name?.toLowerCase() === campaignName.toLowerCase()
-      )
-
-      if (!campaign) {
-        errors.push(`Campaign "${campaignName}" tidak ditemukan`)
-        continue
-      }
-
-      // Match client: dari kolom client_name di CSV, atau dari campaign
-      let clientId = campaign.client_id
-      if (clientName) {
-        const client = allClients?.find(c =>
-          c.client_name?.toLowerCase() === clientName.toLowerCase()
-        )
-        if (client) clientId = client.client_id
-      }
-
-      // Match platform: dari kolom platform di CSV, atau dari campaign
-      let platformId = campaign.platform_id
-      if (platformName) {
-        const platform = allPlatforms?.find(p =>
-          p.platform_name?.toLowerCase() === platformName.toLowerCase()
-        )
-        if (platform) platformId = platform.platform_id
-      }
-
+      const campaignName = row.campaign_name?.trim() || ''
+      const platformName = row.platform?.trim() || 'Meta' // default Meta
       const reportDate = row.report_date || row.date || ''
-      if (!reportDate) { errors.push(`Baris tanpa tanggal dilewati`); continue }
+
+      if (!campaignName) { errors.push('Baris tanpa campaign_name dilewati'); continue }
+      if (!reportDate) { errors.push('Baris tanpa tanggal dilewati'); continue }
+
+      // Cari atau buat campaign
+      let campaignId = campaignCache[campaignName.toLowerCase()]
+
+      if (!campaignId) {
+        // Auto-create campaign
+        const platform = allPlatforms?.find(p => p.platform_name?.toLowerCase() === platformName.toLowerCase())
+          || allPlatforms?.find(p => p.platform_name === 'Meta') // fallback Meta
+
+        if (!platform) { errors.push(`Platform tidak ditemukan untuk "${campaignName}"`); continue }
+
+        const { data: newCampaign, error: campErr } = await supabase
+          .from('dim_campaigns')
+          .insert({
+            campaign_name: campaignName,
+            platform_id: platform.platform_id,
+            client_id: csvClientId,
+            objective: 'Traffic',
+            status: 'Active',
+            budget_type: 'daily',
+          })
+          .select()
+          .single()
+
+        if (campErr || !newCampaign) {
+          errors.push(`Gagal buat campaign "${campaignName}": ${campErr?.message}`)
+          continue
+        }
+
+        campaignId = newCampaign.campaign_id
+        campaignCache[campaignName.toLowerCase()] = campaignId
+      }
+
+      // Cari platform_id dari campaign atau dari kolom platform di CSV
+      const platform = allPlatforms?.find(p =>
+        p.platform_name?.toLowerCase() === platformName.toLowerCase()
+      ) || allPlatforms?.[0]
 
       rowsToInsert.push({
-        campaign_id: campaign.campaign_id,
-        platform_id: platformId,
-        client_id: clientId,
+        campaign_id: campaignId,
+        platform_id: platform?.platform_id,
+        client_id: csvClientId,
         report_date: reportDate,
         impressions: Number(row.impressions) || 0,
         reach: Number(row.reach) || 0,
@@ -355,7 +351,7 @@ export default function DataInputTab() {
     }
 
     if (rowsToInsert.length === 0) {
-      setErrorMsg('Tidak ada baris valid untuk diimport. ' + errors.slice(0, 3).join(', '))
+      setErrorMsg('Tidak ada baris valid. ' + errors.slice(0, 3).join(', '))
       setLoadingCsv(false)
       return
     }
@@ -365,10 +361,11 @@ export default function DataInputTab() {
       setErrorMsg('Gagal import: ' + error.message)
     } else {
       const skipped = csvData.length - rowsToInsert.length
-      setSuccessMsg(`${rowsToInsert.length} baris berhasil diimport!${skipped > 0 ? ` (${skipped} baris dilewati)` : ''}`)
+      setSuccessMsg(`${rowsToInsert.length} baris berhasil diimport!${skipped > 0 ? ` (${skipped} dilewati)` : ''}`)
       setCsvFile(null)
       setCsvData([])
       setCsvPreview({ matched: 0, unmatched: [], rows: [] })
+      setCsvClientId('')
       fetchRecentData()
     }
     setLoadingCsv(false)
@@ -391,27 +388,23 @@ export default function DataInputTab() {
   return (
     <div style={{ maxWidth: '1100px', margin: '0 auto' }}>
 
-      {successMsg && <div style={{ background: '#EAF3DE', color: '#27500A', fontSize: '12px', padding: '10px 14px', borderRadius: '8px', marginBottom: '16px' }}>✓ {successMsg}</div>}
-      {errorMsg && <div style={{ background: '#FCEBEB', color: '#A32D2D', fontSize: '12px', padding: '10px 14px', borderRadius: '8px', marginBottom: '16px' }}>⚠ {errorMsg}</div>}
+      {successMsg && <div onClick={() => setSuccessMsg('')} style={{ background: '#EAF3DE', color: '#27500A', fontSize: '12px', padding: '10px 14px', borderRadius: '8px', marginBottom: '16px', cursor: 'pointer' }}>✓ {successMsg}</div>}
+      {errorMsg && <div onClick={() => setErrorMsg('')} style={{ background: '#FCEBEB', color: '#A32D2D', fontSize: '12px', padding: '10px 14px', borderRadius: '8px', marginBottom: '16px', cursor: 'pointer' }}>⚠ {errorMsg}</div>}
 
       {/* Add Client Modal */}
       {showAddClient && (
         <Card title="Tambah client baru">
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px', marginBottom: '14px' }}>
             <div><Label required>Nama client</Label><Input value={newClient.name} onChange={v => setNewClient(c => ({ ...c, name: v }))} placeholder="e.g. PT Maju Bersama" /></div>
-            <div><Label>Jenis bisnis</Label><Input value={newClient.business_type} onChange={v => setNewClient(c => ({ ...c, business_type: v }))} placeholder="e.g. E-commerce, F&B, Fashion" /></div>
-            <div><Label>Email kontak</Label><Input value={newClient.contact_email} onChange={v => setNewClient(c => ({ ...c, contact_email: v }))} type="email" placeholder="e.g. admin@client.com" /></div>
-            <div><Label>No. telepon</Label><Input value={newClient.contact_phone} onChange={v => setNewClient(c => ({ ...c, contact_phone: v }))} placeholder="e.g. 08123456789" /></div>
+            <div><Label>Jenis bisnis</Label><Input value={newClient.business_type} onChange={v => setNewClient(c => ({ ...c, business_type: v }))} placeholder="e.g. E-commerce, F&B" /></div>
+            <div><Label>Email kontak</Label><Input value={newClient.contact_email} onChange={v => setNewClient(c => ({ ...c, contact_email: v }))} type="email" placeholder="admin@client.com" /></div>
+            <div><Label>No. telepon</Label><Input value={newClient.contact_phone} onChange={v => setNewClient(c => ({ ...c, contact_phone: v }))} placeholder="08123456789" /></div>
           </div>
           <div style={{ display: 'flex', gap: '10px' }}>
-            <button onClick={handleAddClient} disabled={savingClient}
-              style={{ padding: '8px 20px', background: '#185FA5', color: '#fff', border: 'none', borderRadius: '8px', fontSize: '12px', fontWeight: 500, cursor: 'pointer' }}>
+            <button onClick={handleAddClient} disabled={savingClient} style={{ padding: '8px 20px', background: '#185FA5', color: '#fff', border: 'none', borderRadius: '8px', fontSize: '12px', fontWeight: 500, cursor: 'pointer' }}>
               {savingClient ? 'Menyimpan...' : 'Simpan Client'}
             </button>
-            <button onClick={() => setShowAddClient(false)}
-              style={{ padding: '8px 16px', background: '#fff', color: '#555', border: '0.5px solid rgba(0,0,0,0.15)', borderRadius: '8px', fontSize: '12px', cursor: 'pointer' }}>
-              Batal
-            </button>
+            <button onClick={() => setShowAddClient(false)} style={{ padding: '8px 16px', background: '#fff', color: '#555', border: '0.5px solid rgba(0,0,0,0.15)', borderRadius: '8px', fontSize: '12px', cursor: 'pointer' }}>Batal</button>
           </div>
         </Card>
       )}
@@ -422,13 +415,9 @@ export default function DataInputTab() {
           <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
               <Label required>1. Client</Label>
-              <button onClick={() => setShowAddClient(true)}
-                style={{ fontSize: '10px', padding: '2px 8px', background: '#E6F1FB', color: '#185FA5', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 500 }}>
-                + Tambah Client
-              </button>
+              <button onClick={() => setShowAddClient(true)} style={{ fontSize: '10px', padding: '2px 8px', background: '#E6F1FB', color: '#185FA5', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 500 }}>+ Tambah Client</button>
             </div>
-            <SelectField value={form.client_id} onChange={v => set('client_id', v)}
-              options={clients.map(c => ({ value: c.client_id, label: c.client_name }))} placeholder="— Pilih Client —" />
+            <SelectField value={form.client_id} onChange={v => set('client_id', v)} options={clients.map(c => ({ value: c.client_id, label: c.client_name }))} placeholder="— Pilih Client —" />
           </div>
           <div>
             <Label required>2. Platform</Label>
@@ -470,17 +459,29 @@ export default function DataInputTab() {
         </button>
       </Card>
 
-      {/* CSV Import — simplified */}
+      {/* CSV Import */}
       <Card title="Import CSV dari Ads Manager">
-        {/* Format info */}
         <div style={{ background: '#f5f5f3', borderRadius: '8px', padding: '12px 14px', marginBottom: '16px' }}>
-          <div style={{ fontSize: '11px', fontWeight: 500, color: '#555', marginBottom: '6px' }}>Format kolom CSV yang didukung:</div>
+          <div style={{ fontSize: '11px', fontWeight: 500, color: '#555', marginBottom: '6px' }}>Format kolom CSV:</div>
           <code style={{ fontSize: '11px', color: '#185FA5', lineHeight: '1.8' }}>
-            campaign_name, report_date, impressions, reach, clicks, spend, conversions_7d_click, conversion_value, purchases
+            campaign_name, platform, report_date, impressions, reach, clicks, spend, conversions_7d_click, conversion_value, purchases
           </code>
           <div style={{ fontSize: '10px', color: '#888', marginTop: '6px' }}>
-            Kolom <strong>campaign_name</strong> wajib ada dan harus sesuai dengan nama campaign di sistem.
-            Kolom <strong>client_name</strong> dan <strong>platform</strong> opsional — akan otomatis diambil dari data campaign.
+            Kolom <strong>campaign_name</strong> wajib ada. Kalau campaign belum ada di sistem, akan otomatis dibuat.
+            Kolom <strong>platform</strong> opsional (default: Meta).
+          </div>
+        </div>
+
+        {/* Pilih Client untuk CSV */}
+        <div style={{ marginBottom: '14px' }}>
+          <Label required>Client untuk import ini</Label>
+          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+            <select value={csvClientId} onChange={e => setCsvClientId(e.target.value)}
+              style={{ padding: '8px 10px', fontSize: '12px', border: '0.5px solid rgba(0,0,0,0.2)', borderRadius: '6px', background: '#fff', outline: 'none', minWidth: '200px' }}>
+              <option value="">— Pilih Client —</option>
+              {clients.map(c => <option key={c.client_id} value={c.client_id}>{c.client_name}</option>)}
+            </select>
+            <span style={{ fontSize: '11px', color: '#888' }}>Campaign baru dari CSV akan di-assign ke client ini</span>
           </div>
         </div>
 
@@ -489,8 +490,7 @@ export default function DataInputTab() {
           display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
           border: csvFile ? '1.5px solid #185FA5' : '1.5px dashed rgba(0,0,0,0.15)',
           borderRadius: '10px', padding: '32px 20px', cursor: 'pointer',
-          background: csvFile ? '#f0f6ff' : '#fafaf9', marginBottom: '16px',
-          transition: 'all 0.15s',
+          background: csvFile ? '#f0f6ff' : '#fafaf9', marginBottom: '16px', transition: 'all 0.15s',
         }}>
           <div style={{ fontSize: '24px', marginBottom: '8px' }}>{csvFile ? '📄' : '☁️'}</div>
           <div style={{ fontSize: '13px', fontWeight: 500, color: csvFile ? '#185FA5' : '#555', marginBottom: '4px' }}>
@@ -502,37 +502,29 @@ export default function DataInputTab() {
           <input type="file" accept=".csv" style={{ display: 'none' }} onChange={handleCsvUpload} />
         </label>
 
-        {/* Analyzing state */}
         {analyzingCsv && (
-          <div style={{ textAlign: 'center', padding: '12px', fontSize: '12px', color: '#888' }}>
-            Menganalisis file...
-          </div>
+          <div style={{ textAlign: 'center', padding: '12px', fontSize: '12px', color: '#888' }}>Menganalisis file...</div>
         )}
 
-        {/* Preview & validation result */}
         {!analyzingCsv && csvData.length > 0 && (
           <div style={{ marginBottom: '16px' }}>
-            {/* Status */}
             <div style={{ display: 'flex', gap: '10px', marginBottom: '12px', flexWrap: 'wrap' }}>
               <div style={{ background: '#EAF3DE', color: '#27500A', fontSize: '11px', padding: '6px 12px', borderRadius: '6px', fontWeight: 500 }}>
                 ✓ {csvPreview.matched} baris siap diimport
               </div>
               {csvPreview.unmatched.length > 0 && (
-                <div style={{ background: '#FAEEDA', color: '#633806', fontSize: '11px', padding: '6px 12px', borderRadius: '6px' }}>
-                  ⚠ {csvPreview.unmatched.length} peringatan — beberapa campaign mungkin tidak ditemukan
+                <div style={{ background: '#E6F1FB', color: '#185FA5', fontSize: '11px', padding: '6px 12px', borderRadius: '6px' }}>
+                  ℹ {csvPreview.unmatched.length} campaign baru akan dibuat otomatis
                 </div>
               )}
             </div>
 
-            {/* Warnings */}
             {csvPreview.unmatched.length > 0 && (
-              <div style={{ background: '#FAEEDA', borderRadius: '8px', padding: '10px 14px', marginBottom: '12px', fontSize: '11px', color: '#633806' }}>
+              <div style={{ background: '#E6F1FB', borderRadius: '8px', padding: '10px 14px', marginBottom: '12px', fontSize: '11px', color: '#185FA5' }}>
                 {csvPreview.unmatched.slice(0, 5).map((w, i) => <div key={i}>• {w}</div>)}
-                {csvPreview.unmatched.length > 5 && <div>...dan {csvPreview.unmatched.length - 5} peringatan lainnya</div>}
               </div>
             )}
 
-            {/* Preview table */}
             <div style={{ overflowX: 'auto', border: '0.5px solid rgba(0,0,0,0.08)', borderRadius: '8px' }}>
               <div style={{ fontSize: '11px', color: '#888', padding: '8px 10px', borderBottom: '0.5px solid rgba(0,0,0,0.08)' }}>
                 Preview 5 baris pertama dari {csvData.length} total
@@ -555,7 +547,6 @@ export default function DataInputTab() {
           </div>
         )}
 
-        {/* Import button */}
         <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
           <button onClick={handleCsvImport} disabled={loadingCsv || csvData.length === 0}
             style={{ padding: '10px 24px', background: csvData.length > 0 ? '#3B6D11' : '#ccc', color: '#fff', border: 'none', borderRadius: '8px', fontSize: '12px', fontWeight: 500, cursor: csvData.length > 0 ? 'pointer' : 'not-allowed', opacity: loadingCsv ? 0.7 : 1 }}>
@@ -588,8 +579,12 @@ export default function DataInputTab() {
                 {recentData.map((r, i) => (
                   <tr key={r.record_id} style={{ background: i % 2 === 1 ? '#fafaf9' : '#fff' }}>
                     <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)', whiteSpace: 'nowrap' }}>{r.report_date}</td>
-                    <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)', maxWidth: '160px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{(Array.isArray(r.dim_campaigns) ? r.dim_campaigns[0]?.campaign_name : r.dim_campaigns?.campaign_name) || '—'}</td>
-                    <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)' }}>{platformBadge((Array.isArray(r.dim_platforms) ? r.dim_platforms[0]?.platform_name : r.dim_platforms?.platform_name) || '—')}</td>
+                    <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)', maxWidth: '160px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {(Array.isArray(r.dim_campaigns) ? r.dim_campaigns[0]?.campaign_name : r.dim_campaigns?.campaign_name) || '—'}
+                    </td>
+                    <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)' }}>
+                      {platformBadge((Array.isArray(r.dim_platforms) ? r.dim_platforms[0]?.platform_name : r.dim_platforms?.platform_name) || '—')}
+                    </td>
                     <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)', whiteSpace: 'nowrap' }}>Rp {Number(r.spend).toLocaleString('id')}</td>
                     <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)' }}>{Number(r.impressions).toLocaleString('id')}</td>
                     <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)' }}>{Number(r.clicks).toLocaleString('id')}</td>
