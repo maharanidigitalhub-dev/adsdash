@@ -1,147 +1,89 @@
 // src/contexts/AuthContext.tsx
-import { createContext, useContext, useEffect, useState, ReactNode } from 'react'
-import { User, Session } from '@supabase/supabase-js'
-import { supabase } from '../lib/supabase'
-import type { Profile, AuthUser, Permission, UserRole } from '../types'
-import { PERMISSIONS } from '../types'
+import { createContext, useContext, useEffect, useState } from 'react'
+import { supabase } from './lib/supabase'
+import type { User } from '@supabase/supabase-js'
 
-interface AuthContextValue {
-  user: AuthUser | null
-  session: Session | null
-  loading: boolean
-  signIn: (email: string, password: string) => Promise<{ error: string | null }>
-  signOut: () => Promise<void>
-  refreshProfile: () => Promise<void>
-  can: (permission: Permission) => boolean
-  role: UserRole | null
-  isSuperadmin: boolean  // = founder
-  isManager: boolean     // = admin
-  isStaff: boolean       // = client
-  canManageUsers: boolean
-  canImportData: boolean
-  profile: Profile | null
+interface Profile {
+  id: string
+  email: string
+  full_name: string | null
+  role: 'founder' | 'admin' | 'client'
+  client_id: string | null
 }
 
-const AuthContext = createContext<AuthContextValue | null>(null)
+interface AuthContextType {
+  user: User | null
+  profile: Profile | null
+  loading: boolean
+  signOut: () => Promise<void>
+}
 
-export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<AuthUser | null>(null)
-  const [session, setSession] = useState<Session | null>(null)
+const AuthContext = createContext<AuthContextType>({
+  user: null, profile: null, loading: true, signOut: async () => {},
+})
+
+export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [user, setUser] = useState<User | null>(null)
+  const [profile, setProfile] = useState<Profile | null>(null)
   const [loading, setLoading] = useState(true)
 
-  const fetchProfile = async (authUser: User): Promise<Profile | null> => {
-    // Coba fetch by id dulu
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('id', authUser.id)
-      .single()
-
-    if (!error && data) return data as Profile
-
-    // Fallback: fetch by email kalau id mismatch
-    if (authUser.email) {
-      const { data: data2, error: error2 } = await supabase
+  const fetchProfile = async (userId: string): Promise<Profile | null> => {
+    try {
+      const { data } = await supabase
         .from('profiles')
         .select('*')
-        .eq('email', authUser.email)
+        .eq('id', userId)
         .single()
-
-      if (!error2 && data2) {
-        // Auto-fix id mismatch
-        await supabase
-          .from('profiles')
-          .update({ id: authUser.id })
-          .eq('email', authUser.email)
-        return data2 as Profile
-      }
+      return data as Profile || null
+    } catch {
+      return null
     }
-
-    console.error('fetchProfile failed:', error)
-    return null
-  }
-
-  const loadUser = async (authUser: User | null) => {
-    if (!authUser) { setUser(null); return }
-    const profile = await fetchProfile(authUser)
-    setUser({ id: authUser.id, email: authUser.email!, profile })
   }
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session)
-      loadUser(session?.user ?? null).finally(() => setLoading(false))
+    let mounted = true
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      if (!mounted) return
+      if (session?.user) {
+        setUser(session.user)
+        const p = await fetchProfile(session.user.id)
+        if (mounted) setProfile(p)
+      } else {
+        setUser(null)
+        setProfile(null)
+      }
+      if (mounted) setLoading(false)
     })
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (_event, session) => {
-        setSession(session)
-        await loadUser(session?.user ?? null)
-        setLoading(false)
-      }
-    )
+    const timeout = setTimeout(() => {
+      if (mounted) setLoading(false)
+    }, 5000)
 
-    return () => subscription.unsubscribe()
+    return () => {
+      mounted = false
+      subscription.unsubscribe()
+      clearTimeout(timeout)
+    }
   }, [])
 
-  const signIn = async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({ email, password })
-    if (error) return { error: error.message }
-    return { error: null }
-  }
-
   const signOut = async () => {
+    localStorage.clear()
+    sessionStorage.clear()
     try {
-      await supabase.auth.signOut({ scope: 'global' })
-    } catch (err) {
-      console.warn('signOut error:', err)
-    }
-    setUser(null)
-    setSession(null)
-    localStorage.removeItem('adsdash-auth-v2')
-    sessionStorage.removeItem('adsdash-auth-v2')
+      await Promise.race([
+        supabase.auth.signOut({ scope: 'global' }),
+        new Promise(resolve => setTimeout(resolve, 2000))
+      ])
+    } catch {}
+    window.location.href = '/'
   }
-
-  const refreshProfile = async () => {
-    if (session?.user) await loadUser(session.user)
-  }
-
-  const can = (permission: Permission): boolean => {
-    if (!user?.profile) return false
-    return PERMISSIONS[permission].includes(user.profile.role)
-  }
-
-  const role = user?.profile?.role ?? null
-  const isSuperadmin = role === 'founder'
-  const isManager = role === 'founder' || role === 'admin'
-  const isStaff = role !== null
-  const canManageUsers = role === 'founder'
-  const canImportData = role === 'founder' || role === 'admin'
-  const profile = user?.profile ?? null
 
   return (
-    <AuthContext.Provider value={{
-      user, session, loading,
-      signIn, signOut, refreshProfile,
-      can, role, isSuperadmin, isManager, isStaff,
-      canManageUsers, canImportData, profile,
-    }}>
-      {loading ? (
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          height: '100vh', fontSize: '14px', color: '#94a3b8',
-        }}>
-          Memuat sesi...
-        </div>
-      ) : (
-        children
-      )}
+    <AuthContext.Provider value={{ user, profile, loading, signOut }}>
+      {children}
     </AuthContext.Provider>
   )
 }
 
-export function useAuth() {
-  const ctx = useContext(AuthContext)
-  if (!ctx) throw new Error('useAuth must be used within AuthProvider')
-  return ctx
-}
+export const useAuth = () => useContext(AuthContext)
