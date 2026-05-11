@@ -302,28 +302,28 @@ export default function UpdateSettingTab() {
   const confirmDelete = (id: string, name: string) => { setDeleteId(id); setDeleteName(name) }
 
   const handleDelete = async () => {
-    if (!deleteId) return
-    setDeleting(true)
+  if (!deleteId) return
+  setDeleting(true)
 
-    // Hapus fact_daily_performance dulu (foreign key)
-    await supabase.from('fact_daily_performance').delete().eq('campaign_id', deleteId)
+  const { error } = await supabase
+    .from('dim_campaigns')
+    .delete()
+    .eq('campaign_id', deleteId)
 
-    // Hapus dim_ads
-    await supabase.from('dim_ads').delete().eq('campaign_id', deleteId)
-
-    // Hapus dim_adsets
-    await supabase.from('dim_adsets').delete().eq('campaign_id', deleteId)
-
-    // Hapus campaign
-    const { error } = await supabase.from('dim_campaigns').delete().eq('campaign_id', deleteId)
-
-    if (error) showToast('Gagal menghapus campaign.', 'error')
-    else {
-      showToast('Campaign berhasil dihapus.')
-      setCampaigns(prev => prev.filter(c => c.id !== deleteId))
-    }
-    setDeleting(false); setDeleteId(null); setDeleteName('')
+  if (error) {
+    showToast('Gagal menghapus campaign.', 'error')
+    console.error('Delete error:', error)
+  } else {
+    // Update state lokal dulu
+    setCampaigns(prev => prev.filter(c => c.id !== deleteId))
+    showToast('Campaign berhasil dihapus.')
   }
+
+  setDeleting(false)
+  setDeleteId(null)
+  setDeleteName('')
+}
+
 
   const handleEditSaved = (updated: Campaign) => {
     setCampaigns(prev => prev.map(c => c.id === updated.id ? updated : c))
