@@ -1,4 +1,3 @@
-// src/App.tsx
 import { useState, useEffect, useCallback } from 'react'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import TopBar from './components/TopBar'
@@ -34,6 +33,7 @@ function Dashboard() {
   const { user, profile, signOut } = useAuth()
   const [activeTab, setActiveTab] = useState<Tab>('overview')
   const [selectedClient, setSelectedClient] = useState<string>('all')
+  const [assignedClientIds, setAssignedClientIds] = useState<string[]>([])
   const [globalRows, setGlobalRows] = useState<DailyRow[]>([])
   const [dataLoading, setDataLoading] = useState(true)
   const [filters, setFilters] = useState<FilterState>(DEFAULT_FILTERS)
@@ -41,111 +41,202 @@ function Dashboard() {
   const role = profile?.role ?? 'client'
   const canAccessAdmin = role === 'founder' || role === 'admin'
 
-  const fetchGlobalData = useCallback(async (
+  // Fetch data filtered by client IDs (for non-founder)
+  const fetchGlobalDataByIds = useCallback(async (
+    clientIds: string[],
     clientId: string,
     activeFilters: FilterState,
   ) => {
     setDataLoading(true)
+    try {
+      let query = supabase
+        .from('fact_daily_performance')
+        .select(`
+          report_date, spend, impressions, clicks,
+          conversions_7d_click, conversion_value, client_id, campaign_id,
+          dim_platforms(platform_name),
+          dim_campaigns(campaign_name)
+        `)
+        .order('report_date', { ascending: true })
 
-    let query = supabase
-      .from('fact_daily_performance')
-      .select(`
-        report_date, spend, impressions, clicks,
-        conversions_7d_click, conversion_value, client_id,
-        dim_platforms(platform_name)
-      `)
-      .order('report_date', { ascending: true })
-
-    if (clientId !== 'all') query = query.eq('client_id', clientId)
-
-    if (activeFilters.dateRange) {
-      query = query
-        .gte('report_date', activeFilters.dateRange.from)
-        .lte('report_date', activeFilters.dateRange.to)
-    }
-
-    const { data, error } = await query
-
-    if (!error && data) {
-      let mapped: DailyRow[] = data.map((r: any) => ({
-        report_date: r.report_date,
-        spend: Number(r.spend),
-        impressions: Number(r.impressions),
-        clicks: Number(r.clicks),
-        conversions_7d_click: Number(r.conversions_7d_click),
-        conversion_value: Number(r.conversion_value),
-        platform_name: Array.isArray(r.dim_platforms)
-          ? r.dim_platforms[0]?.platform_name
-          : r.dim_platforms?.platform_name || 'Unknown',
-      }))
-
-      if (activeFilters.platform !== 'All') {
-        mapped = mapped.filter(
-          row => row.platform_name.toLowerCase() === activeFilters.platform.toLowerCase()
-        )
+      // Filter by specific client or all assigned clients
+      if (clientId !== 'all') {
+        query = query.eq('client_id', clientId)
+      } else if (clientIds.length > 0) {
+        query = query.in('client_id', clientIds)
       }
 
-      setGlobalRows(mapped)
-    } else if (error) {
-      console.error('fetchGlobalData error:', error.message)
-    }
+      if (activeFilters.dateRange) {
+        query = query
+          .gte('report_date', activeFilters.dateRange.from)
+          .lte('report_date', activeFilters.dateRange.to)
+      }
 
+      const { data, error } = await query
+      if (!error && data) {
+        let mapped: DailyRow[] = data.map((r: any) => ({
+          report_date: r.report_date,
+          spend: Number(r.spend),
+          impressions: Number(r.impressions),
+          clicks: Number(r.clicks),
+          conversions_7d_click: Number(r.conversions_7d_click),
+          conversion_value: Number(r.conversion_value),
+          platform_name: Array.isArray(r.dim_platforms)
+            ? r.dim_platforms[0]?.platform_name
+            : r.dim_platforms?.platform_name || 'Unknown',
+          campaign_name: Array.isArray(r.dim_campaigns)
+            ? r.dim_campaigns[0]?.campaign_name
+            : r.dim_campaigns?.campaign_name,
+          campaign_id: r.campaign_id,
+          client_id: r.client_id,
+        }))
+        if (activeFilters.platform !== 'All') {
+          mapped = mapped.filter(row =>
+            row.platform_name.toLowerCase() === activeFilters.platform.toLowerCase()
+          )
+        }
+        setGlobalRows(mapped)
+      }
+    } catch (e) { console.error(e) }
     setDataLoading(false)
   }, [])
+
+  // Fetch all data (founder only)
+  const fetchGlobalDataAll = useCallback(async (activeFilters: FilterState) => {
+    setDataLoading(true)
+    try {
+      let query = supabase
+        .from('fact_daily_performance')
+        .select(`
+          report_date, spend, impressions, clicks,
+          conversions_7d_click, conversion_value, client_id, campaign_id,
+          dim_platforms(platform_name),
+          dim_campaigns(campaign_name)
+        `)
+        .order('report_date', { ascending: true })
+
+      if (activeFilters.dateRange) {
+        query = query
+          .gte('report_date', activeFilters.dateRange.from)
+          .lte('report_date', activeFilters.dateRange.to)
+      }
+
+      const { data, error } = await query
+      if (!error && data) {
+        let mapped: DailyRow[] = data.map((r: any) => ({
+          report_date: r.report_date,
+          spend: Number(r.spend),
+          impressions: Number(r.impressions),
+          clicks: Number(r.clicks),
+          conversions_7d_click: Number(r.conversions_7d_click),
+          conversion_value: Number(r.conversion_value),
+          platform_name: Array.isArray(r.dim_platforms)
+            ? r.dim_platforms[0]?.platform_name
+            : r.dim_platforms?.platform_name || 'Unknown',
+          campaign_name: Array.isArray(r.dim_campaigns)
+            ? r.dim_campaigns[0]?.campaign_name
+            : r.dim_campaigns?.campaign_name,
+          campaign_id: r.campaign_id,
+          client_id: r.client_id,
+        }))
+        if (activeFilters.platform !== 'All') {
+          mapped = mapped.filter(row =>
+            row.platform_name.toLowerCase() === activeFilters.platform.toLowerCase()
+          )
+        }
+        setGlobalRows(mapped)
+      }
+    } catch (e) { console.error(e) }
+    setDataLoading(false)
+  }, [])
+
   useEffect(() => {
-  if (!user) return
-  if (profile?.role === 'client' && profile?.client_id) {
-    setSelectedClient(profile.client_id)
-    fetchGlobalData(profile.client_id, filters)
-  } else {
-    fetchGlobalData('all', filters)
-  }
+    if (!user || !profile) return
 
-  // Realtime subscription
-  const channel = supabase
-    .channel('db-changes')
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'fact_daily_performance' }, () => {
-      fetchGlobalData(selectedClient, filters)
-    })
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'dim_campaigns' }, () => {
-      fetchGlobalData(selectedClient, filters)
-    })
-    .subscribe()
+    const initData = async () => {
+      if (profile.role === 'founder') {
+        // Founder lihat semua
+        setAssignedClientIds([])
+        fetchGlobalDataAll(filters)
+      } else {
+        // Admin & client: fetch assigned clients dari user_clients
+        const { data: userClients } = await supabase
+          .from('user_clients')
+          .select('client_id')
+          .eq('user_id', user.id)
 
-  return () => { supabase.removeChannel(channel) }
-}, [user, profile])
+        const ids = userClients?.map((uc: any) => uc.client_id) || []
+        setAssignedClientIds(ids)
 
+        if (ids.length === 0) {
+          setGlobalRows([])
+          setDataLoading(false)
+          return
+        }
 
-  useEffect(() => {
-    if (!user) return
-    if (profile?.role === 'client' && profile?.client_id) {
-      setSelectedClient(profile.client_id)
-      fetchGlobalData(profile.client_id, filters)
-    } else {
-      fetchGlobalData('all', filters)
+        if (ids.length === 1) {
+          setSelectedClient(ids[0])
+          fetchGlobalDataByIds(ids, ids[0], filters)
+        } else {
+          setSelectedClient('all')
+          fetchGlobalDataByIds(ids, 'all', filters)
+        }
+      }
     }
+
+    initData()
+
+    // Realtime
+    const channel = supabase
+      .channel('db-changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'fact_daily_performance' }, () => {
+        initData()
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'dim_campaigns' }, () => {
+        initData()
+      })
+      .subscribe()
+
+    return () => { supabase.removeChannel(channel) }
   }, [user, profile])
 
   const handleClientChange = (clientId: string) => {
     setSelectedClient(clientId)
-    fetchGlobalData(clientId, filters)
+    if (role === 'founder') {
+      if (clientId === 'all') fetchGlobalDataAll(filters)
+      else fetchGlobalDataByIds([], clientId, filters)
+    } else {
+      fetchGlobalDataByIds(assignedClientIds, clientId, filters)
+    }
   }
 
   const handleFilterChange = (newFilters: FilterState) => {
     setFilters(newFilters)
     if (newFilters.period === 'Custom' && !newFilters.dateRange) return
-    fetchGlobalData(selectedClient, newFilters)
+    if (role === 'founder') {
+      if (selectedClient === 'all') fetchGlobalDataAll(newFilters)
+      else fetchGlobalDataByIds([], selectedClient, newFilters)
+    } else {
+      fetchGlobalDataByIds(assignedClientIds, selectedClient, newFilters)
+    }
   }
 
   const globalData: GlobalData = {
     rows: globalRows,
     loading: dataLoading,
-    refetch: () => fetchGlobalData(selectedClient, filters),
+    refetch: () => {
+      if (role === 'founder') {
+        if (selectedClient === 'all') fetchGlobalDataAll(filters)
+        else fetchGlobalDataByIds([], selectedClient, filters)
+      } else {
+        fetchGlobalDataByIds(assignedClientIds, selectedClient, filters)
+      }
+    },
     filters,
   }
 
   return (
-    <div className="min-h-screen" style={{ background: '#f5f5f3' }}>
+    <div style={{ minHeight: '100vh', background: '#f5f5f3' }}>
       <TopBar
         onSignOut={signOut}
         userEmail={user?.email}
@@ -154,13 +245,14 @@ function Dashboard() {
         onClientChange={handleClientChange}
         filters={filters}
         onFilterChange={handleFilterChange}
+        assignedClientIds={assignedClientIds}
       />
       <TabNav activeTab={activeTab} onTabChange={setActiveTab} role={role} />
-      <main className="p-4">
+      <main style={{ padding: '16px 20px' }}>
         {activeTab === 'overview'   && <OverviewTab globalData={globalData} />}
         {activeTab === 'campaign'   && <CampaignTab clientId={selectedClient} globalData={globalData} />}
-        {activeTab === 'creative'   && <CreativeTab globalData={globalData} />}
-        {activeTab === 'audience'   && <AudienceTab globalData={globalData} />}
+        {activeTab === 'creative'   && <CreativeTab clientId={selectedClient} globalData={globalData} />}
+        {activeTab === 'audience'   && <AudienceTab clientId={selectedClient} />}
         {activeTab === 'budget'     && <BudgetTab clientId={selectedClient} globalData={globalData} />}
         {activeTab === 'conversion' && <ConversionTab clientId={selectedClient} globalData={globalData} />}
         {canAccessAdmin && activeTab === 'settings'  && <AdsSettingTab />}
@@ -174,20 +266,14 @@ function Dashboard() {
 
 function AppContent() {
   const { user, loading } = useAuth()
-
   if (loading) {
     return (
-      <div style={{
-        minHeight: '100vh', display: 'flex',
-        alignItems: 'center', justifyContent: 'center', background: '#f5f5f3',
-      }}>
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f5f5f3' }}>
         <div style={{ fontSize: '14px', color: '#888' }}>Memuat...</div>
       </div>
     )
   }
-
   if (!user) return <LoginPage />
-
   return <Dashboard />
 }
 
