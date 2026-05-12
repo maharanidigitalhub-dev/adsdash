@@ -10,6 +10,7 @@ interface Props {
   selectedClient?: string
   onFilterChange?: (filters: FilterState) => void
   filters?: FilterState
+  assignedClientIds?: string[]
 }
 
 const platforms: PlatformFilter[] = ['All', 'Meta', 'Google', 'TikTok']
@@ -23,16 +24,12 @@ function roleBadge(role: string) {
   }
   const s = map[role] || map['client']
   return (
-    <span style={{
-      fontSize: '10px', padding: '2px 8px', borderRadius: '99px',
-      fontWeight: 500, background: s.bg, color: s.color,
-    }}>
+    <span style={{ fontSize: '10px', padding: '2px 8px', borderRadius: '99px', fontWeight: 500, background: s.bg, color: s.color }}>
       {role}
     </span>
   )
 }
 
-// Helper: hitung default dateRange berdasarkan period
 function getDateRangeForPeriod(period: PeriodFilter): DateRange | null {
   if (period === 'Custom') return null
   const to = new Date()
@@ -49,6 +46,7 @@ export default function TopBar({
   onSignOut, userEmail, role,
   onClientChange, selectedClient,
   onFilterChange, filters,
+  assignedClientIds = [],
 }: Props) {
   const canSeeAllClients = role === 'founder' || role === 'admin'
   const [clients, setClients] = useState<{ client_id: string; client_name: string }[]>([])
@@ -58,7 +56,6 @@ export default function TopBar({
   const [signOutHovered, setSignOutHovered] = useState(false)
   const pickerRef = useRef<HTMLDivElement>(null)
 
-  // Inisialisasi customFrom/To dari filters kalau sudah ada
   useEffect(() => {
     if (filters?.dateRange) {
       setCustomFrom(filters.dateRange.from)
@@ -67,17 +64,32 @@ export default function TopBar({
   }, [])
 
   useEffect(() => {
-    if (canSeeAllClients) {
-      supabase
-        .from('dim_clients')
-        .select('client_id, client_name')
-        .eq('is_active', true)
-        .order('client_name')
-        .then(({ data }) => { if (data) setClients(data) })
-    }
-  }, [role])
+    if (!canSeeAllClients) return
 
-  // Tutup custom picker kalau klik di luar
+    const fetchClients = async () => {
+      if (role === 'founder') {
+        // Founder lihat semua client
+        const { data } = await supabase
+          .from('dim_clients')
+          .select('client_id, client_name')
+          .eq('is_active', true)
+          .order('client_name')
+        if (data) setClients(data)
+      } else if (role === 'admin' && assignedClientIds.length > 0) {
+        // Admin hanya lihat client yang di-assign
+        const { data } = await supabase
+          .from('dim_clients')
+          .select('client_id, client_name')
+          .in('client_id', assignedClientIds)
+          .eq('is_active', true)
+          .order('client_name')
+        if (data) setClients(data)
+      }
+    }
+
+    fetchClients()
+  }, [role, assignedClientIds])
+
   useEffect(() => {
     const handler = (e: globalThis.MouseEvent) => {
       if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
@@ -100,28 +112,21 @@ export default function TopBar({
     onFilterChange?.({ ...current, ...patch })
   }
 
-  const handlePlatform = (p: PlatformFilter) => {
-    emitFilter({ platform: p })
-  }
+  const handlePlatform = (p: PlatformFilter) => emitFilter({ platform: p })
 
   const handlePeriod = (p: PeriodFilter) => {
     if (p === 'Custom') {
-      // Tampilkan date picker, belum emit filter sampai user konfirmasi
       setShowCustomPicker(true)
-      emitFilter({ period: 'Custom', dateRange: null })
+      emitFilter({ period: 'Custom', dateRange: undefined })
     } else {
       setShowCustomPicker(false)
-      emitFilter({ period: p, dateRange: getDateRangeForPeriod(p) })
+      emitFilter({ period: p, dateRange: getDateRangeForPeriod(p) ?? undefined })
     }
   }
 
   const applyCustomRange = () => {
-    if (!customFrom || !customTo) return
-    if (customFrom > customTo) return // validasi sederhana
-    emitFilter({
-      period: 'Custom',
-      dateRange: { from: customFrom, to: customTo },
-    })
+    if (!customFrom || !customTo || customFrom > customTo) return
+    emitFilter({ period: 'Custom', dateRange: { from: customFrom, to: customTo } })
     setShowCustomPicker(false)
   }
 
@@ -149,8 +154,8 @@ export default function TopBar({
       {/* Filters */}
       <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center', position: 'relative' }}>
 
-        {/* Client Selector */}
-        {canSeeAllClients && (
+        {/* Client Selector — founder & admin dengan multiple clients */}
+        {canSeeAllClients && clients.length > 1 && (
           <>
             <span style={{ fontSize: '11px', color: '#888' }}>Client:</span>
             <select
@@ -172,12 +177,17 @@ export default function TopBar({
           </>
         )}
 
+        {/* Client label saja kalau hanya 1 client */}
+        {canSeeAllClients && clients.length === 1 && (
+          <span style={{ fontSize: '11px', padding: '4px 10px', borderRadius: '99px', border: '0.5px solid #d1d1d1', background: '#E6F1FB', color: '#185FA5', fontWeight: 500 }}>
+            {clients[0].client_name}
+          </span>
+        )}
+
         {/* Platform Filter */}
         <span style={{ fontSize: '11px', color: '#888' }}>Platform:</span>
         {platforms.map(p => (
-          <button key={p} onClick={() => handlePlatform(p)} style={btnStyle(activePlatform === p)}>
-            {p}
-          </button>
+          <button key={p} onClick={() => handlePlatform(p)} style={btnStyle(activePlatform === p)}>{p}</button>
         ))}
 
         {/* Period Filter */}
@@ -190,7 +200,7 @@ export default function TopBar({
           </button>
         ))}
 
-        {/* Custom Date Picker Dropdown */}
+        {/* Custom Date Picker */}
         {showCustomPicker && (
           <div ref={pickerRef} style={{
             position: 'absolute', top: '36px', right: 0,
@@ -200,65 +210,30 @@ export default function TopBar({
             zIndex: 200, display: 'flex', flexDirection: 'column', gap: '10px',
             minWidth: '260px',
           }}>
-            <div style={{ fontSize: '12px', fontWeight: 600, color: '#1a1a1a' }}>
-              Pilih Rentang Tanggal
-            </div>
+            <div style={{ fontSize: '12px', fontWeight: 600, color: '#1a1a1a' }}>Pilih Rentang Tanggal</div>
             <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: '10px', color: '#888', marginBottom: '3px' }}>Dari</div>
-                <input
-                  type="date"
-                  value={customFrom}
-                  max={customTo || undefined}
-                  onChange={e => setCustomFrom(e.target.value)}
-                  style={{
-                    width: '100%', fontSize: '11px', padding: '5px 8px',
-                    border: '0.5px solid #d1d1d1', borderRadius: '6px',
-                    outline: 'none', cursor: 'pointer',
-                  }}
-                />
+                <input type="date" value={customFrom} max={customTo || undefined} onChange={e => setCustomFrom(e.target.value)}
+                  style={{ width: '100%', fontSize: '11px', padding: '5px 8px', border: '0.5px solid #d1d1d1', borderRadius: '6px', outline: 'none', cursor: 'pointer' }} />
               </div>
               <div style={{ fontSize: '11px', color: '#888', marginTop: '16px' }}>→</div>
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: '10px', color: '#888', marginBottom: '3px' }}>Sampai</div>
-                <input
-                  type="date"
-                  value={customTo}
-                  min={customFrom || undefined}
-                  onChange={e => setCustomTo(e.target.value)}
-                  style={{
-                    width: '100%', fontSize: '11px', padding: '5px 8px',
-                    border: '0.5px solid #d1d1d1', borderRadius: '6px',
-                    outline: 'none', cursor: 'pointer',
-                  }}
-                />
+                <input type="date" value={customTo} min={customFrom || undefined} onChange={e => setCustomTo(e.target.value)}
+                  style={{ width: '100%', fontSize: '11px', padding: '5px 8px', border: '0.5px solid #d1d1d1', borderRadius: '6px', outline: 'none', cursor: 'pointer' }} />
               </div>
             </div>
             {customFrom && customTo && customFrom > customTo && (
-              <div style={{ fontSize: '10px', color: '#e53935' }}>
-                Tanggal awal tidak boleh setelah tanggal akhir
-              </div>
+              <div style={{ fontSize: '10px', color: '#e53935' }}>Tanggal awal tidak boleh setelah tanggal akhir</div>
             )}
             <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
-              <button
-                onClick={() => setShowCustomPicker(false)}
-                style={{
-                  fontSize: '11px', padding: '5px 12px', borderRadius: '6px',
-                  border: '0.5px solid #d1d1d1', background: '#fff',
-                  color: '#666', cursor: 'pointer',
-                }}
-              >
+              <button onClick={() => setShowCustomPicker(false)}
+                style={{ fontSize: '11px', padding: '5px 12px', borderRadius: '6px', border: '0.5px solid #d1d1d1', background: '#fff', color: '#666', cursor: 'pointer' }}>
                 Batal
               </button>
-              <button
-                onClick={applyCustomRange}
-                disabled={!customFrom || !customTo || customFrom > customTo}
-                style={{
-                  fontSize: '11px', padding: '5px 12px', borderRadius: '6px',
-                  border: 'none', background: (!customFrom || !customTo || customFrom > customTo) ? '#ccc' : '#185FA5',
-                  color: '#fff', cursor: (!customFrom || !customTo || customFrom > customTo) ? 'not-allowed' : 'pointer',
-                }}
-              >
+              <button onClick={applyCustomRange} disabled={!customFrom || !customTo || customFrom > customTo}
+                style={{ fontSize: '11px', padding: '5px 12px', borderRadius: '6px', border: 'none', background: (!customFrom || !customTo || customFrom > customTo) ? '#ccc' : '#185FA5', color: '#fff', cursor: (!customFrom || !customTo || customFrom > customTo) ? 'not-allowed' : 'pointer' }}>
                 Terapkan
               </button>
             </div>
@@ -266,7 +241,7 @@ export default function TopBar({
         )}
       </div>
 
-      {/* User Info + Sign Out */}
+      {/* User Info */}
       {userEmail && (
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
           {role && roleBadge(role)}
@@ -280,8 +255,7 @@ export default function TopBar({
               border: `0.5px solid ${signOutHovered ? '#e53935' : '#d1d1d1'}`,
               background: signOutHovered ? '#fff0f0' : '#fff',
               color: signOutHovered ? '#e53935' : '#666',
-              cursor: 'pointer',
-              transition: 'all 0.15s',
+              cursor: 'pointer', transition: 'all 0.15s',
             }}
           >
             Sign out
