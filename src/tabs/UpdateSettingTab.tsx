@@ -41,13 +41,13 @@ const OBJECTIVES = [
   'App Promotion', 'Local Store Visits', 'Website Conversions', 'Product Sales',
 ]
 
-function PlatformBadge({ name }: { name: string }) {
-  const s = PLATFORM_STYLE[name] ?? { bg: '#f0f0f0', color: '#555' }
-  return (
-    <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 99, fontWeight: 600, background: s.bg, color: s.color, whiteSpace: 'nowrap' }}>
-      {name}
-    </span>
-  )
+// Deteksi platform dari nama campaign berdasarkan prefix/keyword umum
+function guessplatformFromName(name: string): string | null {
+  const n = name.toUpperCase()
+  if (n.includes('_GAD_') || n.includes('GAD_') || n.startsWith('GAD')) return 'Google'
+  if (n.includes('_TT_') || n.includes('TT_') || n.startsWith('TT_')) return 'TikTok'
+  if (n.includes('_FB_') || n.includes('_META_') || n.includes('FB_')) return 'Meta'
+  return null
 }
 
 function formatRp(value: number | null) {
@@ -110,11 +110,13 @@ function EditModal({ campaign, onClose, onSaved }: { campaign: Campaign; onClose
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
+  const guessed = guessplatformFromName(campaign.campaign_name)
+  const showMismatchWarning = guessed && guessed !== form.platform_name
+
   const handleSave = async () => {
     if (!form.campaign_name.trim()) { setError('Nama campaign wajib diisi.'); return }
     setSaving(true); setError('')
 
-    // Cari platform_id dari platform_name
     const { data: platformData } = await supabase
       .from('dim_platforms')
       .select('platform_id')
@@ -160,16 +162,20 @@ function EditModal({ campaign, onClose, onSaved }: { campaign: Campaign; onClose
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          {/* Campaign Name */}
           <div>
             <label style={lbl}>Nama Campaign *</label>
             <input value={form.campaign_name} onChange={e => setForm(f => ({ ...f, campaign_name: e.target.value }))} style={f} />
           </div>
 
-          {/* Platform + Status */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <div>
               <label style={lbl}>Platform</label>
+              {/* FIX: tampilkan warning jika nama & platform tidak cocok */}
+              {showMismatchWarning && (
+                <div style={{ fontSize: 10, color: '#854F0B', background: '#FAEEDA', border: '0.5px solid #f5ce8a', borderRadius: 4, padding: '4px 8px', marginBottom: 6 }}>
+                  ⚠ Nama mengandung "{guessed}" — pastikan platform sudah benar
+                </div>
+              )}
               <select value={form.platform_name} onChange={e => setForm(f => ({ ...f, platform_name: e.target.value }))}
                 style={{ ...f, background: PLATFORM_STYLE[form.platform_name]?.bg || '#fafafa', color: PLATFORM_STYLE[form.platform_name]?.color || '#1a1a1a' }}>
                 {PLATFORM_LIST.map(p => <option key={p} value={p}>{p}</option>)}
@@ -184,7 +190,6 @@ function EditModal({ campaign, onClose, onSaved }: { campaign: Campaign; onClose
             </div>
           </div>
 
-          {/* Objective */}
           <div>
             <label style={lbl}>Objective</label>
             <select value={form.objective} onChange={e => setForm(f => ({ ...f, objective: e.target.value }))} style={f}>
@@ -192,7 +197,6 @@ function EditModal({ campaign, onClose, onSaved }: { campaign: Campaign; onClose
             </select>
           </div>
 
-          {/* Budget */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <div>
               <label style={lbl}>Daily Budget (Rp)</label>
@@ -204,7 +208,6 @@ function EditModal({ campaign, onClose, onSaved }: { campaign: Campaign; onClose
             </div>
           </div>
 
-          {/* Target ROAS + CPA */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <div>
               <label style={lbl}>Target ROAS (x)</label>
@@ -216,7 +219,6 @@ function EditModal({ campaign, onClose, onSaved }: { campaign: Campaign; onClose
             </div>
           </div>
 
-          {/* Period */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <div>
               <label style={lbl}>Start Date</label>
@@ -254,11 +256,27 @@ export default function UpdateSettingTab() {
   const [deleting, setDeleting] = useState(false)
   const [editCampaign, setEditCampaign] = useState<Campaign | null>(null)
   const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' } | null>(null)
+  // FIX: state untuk menyimpan platform_id map dari DB
+  const [platformIdMap, setPlatformIdMap] = useState<Record<string, string>>({})
+  const [fixingAll, setFixingAll] = useState(false)
 
   const showToast = (msg: string, type: 'success' | 'error' = 'success') => {
     setToast({ msg, type })
-    setTimeout(() => setToast(null), 3000)
+    setTimeout(() => setToast(null), 3500)
   }
+
+  // FIX: fetch platform_id map sekali saat mount
+  useEffect(() => {
+    const fetchPlatforms = async () => {
+      const { data } = await supabase.from('dim_platforms').select('platform_id, platform_name')
+      if (data) {
+        const map: Record<string, string> = {}
+        data.forEach((p: any) => { map[p.platform_name] = p.platform_id })
+        setPlatformIdMap(map)
+      }
+    }
+    fetchPlatforms()
+  }, [])
 
   const fetchCampaigns = useCallback(async () => {
     setLoading(true)
@@ -290,6 +308,49 @@ export default function UpdateSettingTab() {
 
   useEffect(() => { fetchCampaigns() }, [fetchCampaigns])
 
+  // FIX: fungsi update platform dengan platform_id yang benar dari map
+  const handlePlatformChange = async (campaignId: string, newPlatform: string) => {
+    const newPlatformId = platformIdMap[newPlatform]
+    if (!newPlatformId) {
+      // Fallback: fetch dari DB jika map belum ready
+      const { data } = await supabase.from('dim_platforms').select('platform_id').eq('platform_name', newPlatform).single()
+      if (!data) { showToast('Platform ID tidak ditemukan.', 'error'); return }
+      setCampaigns(prev => prev.map(x => x.id === campaignId ? { ...x, platform_name: newPlatform, platform_id: data.platform_id } : x))
+      await supabase.from('dim_campaigns').update({ platform_id: data.platform_id }).eq('campaign_id', campaignId)
+    } else {
+      setCampaigns(prev => prev.map(x => x.id === campaignId ? { ...x, platform_name: newPlatform, platform_id: newPlatformId } : x))
+      await supabase.from('dim_campaigns').update({ platform_id: newPlatformId }).eq('campaign_id', campaignId)
+    }
+    showToast(`Platform diubah ke "${newPlatform}".`)
+  }
+
+  // FIX: deteksi & fix semua campaign yang kemungkinan salah platform sekaligus
+  const mismatchedCampaigns = campaigns.filter(c => {
+    const guessed = guessplatformFromName(c.campaign_name)
+    return guessed && guessed !== c.platform_name
+  })
+
+  const handleFixAllMismatches = async () => {
+    if (mismatchedCampaigns.length === 0) return
+    setFixingAll(true)
+    let fixed = 0
+    for (const c of mismatchedCampaigns) {
+      const guessed = guessplatformFromName(c.campaign_name)!
+      const newPlatformId = platformIdMap[guessed]
+      if (!newPlatformId) continue
+      const { error } = await supabase
+        .from('dim_campaigns')
+        .update({ platform_id: newPlatformId })
+        .eq('campaign_id', c.id)
+      if (!error) {
+        setCampaigns(prev => prev.map(x => x.id === c.id ? { ...x, platform_name: guessed, platform_id: newPlatformId } : x))
+        fixed++
+      }
+    }
+    setFixingAll(false)
+    showToast(`${fixed} campaign berhasil dikoreksi platformnya.`)
+  }
+
   const handleStatusChange = async (id: string, newStatus: string) => {
     setSavingId(id)
     setCampaigns(prev => prev.map(c => c.id === id ? { ...c, status: newStatus } : c))
@@ -302,31 +363,19 @@ export default function UpdateSettingTab() {
   const confirmDelete = (id: string, name: string) => { setDeleteId(id); setDeleteName(name) }
 
   const handleDelete = async () => {
-  if (!deleteId) return
-  setDeleting(true)
-  
-  console.log('Deleting campaign_id:', deleteId)
-  
-  const { data, error } = await supabase
-    .from('dim_campaigns')
-    .delete()
-    .eq('campaign_id', deleteId)
-    .select()
-  
-  console.log('Delete result:', data, 'Error:', error)
-  
-  if (error) {
-    showToast('Gagal menghapus: ' + error.message, 'error')
-  } else {
-    setCampaigns(prev => prev.filter(c => c.id !== deleteId))
-    showToast('Campaign berhasil dihapus.')
+    if (!deleteId) return
+    setDeleting(true)
+    const { error } = await supabase.from('dim_campaigns').delete().eq('campaign_id', deleteId).select()
+    if (error) {
+      showToast('Gagal menghapus: ' + error.message, 'error')
+    } else {
+      setCampaigns(prev => prev.filter(c => c.id !== deleteId))
+      showToast('Campaign berhasil dihapus.')
+    }
+    setDeleting(false)
+    setDeleteId(null)
+    setDeleteName('')
   }
-  setDeleting(false)
-  setDeleteId(null)
-  setDeleteName('')
-}
-
-
 
   const handleEditSaved = (updated: Campaign) => {
     setCampaigns(prev => prev.map(c => c.id === updated.id ? updated : c))
@@ -359,10 +408,8 @@ export default function UpdateSettingTab() {
         </div>
       )}
 
-      {/* Edit Modal */}
       {editCampaign && <EditModal campaign={editCampaign} onClose={() => setEditCampaign(null)} onSaved={handleEditSaved} />}
 
-      {/* Delete Modal */}
       {deleteId && (
         <div style={{ position: 'fixed', inset: 0, zIndex: 9000, background: 'rgba(0,0,0,0.35)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }} onClick={() => { if (!deleting) { setDeleteId(null); setDeleteName('') } }}>
           <div style={{ background: '#fff', borderRadius: 12, padding: '24px 28px', minWidth: 300, maxWidth: 400, boxShadow: '0 8px 32px rgba(0,0,0,0.14)' }} onClick={e => e.stopPropagation()}>
@@ -380,6 +427,34 @@ export default function UpdateSettingTab() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* FIX: Banner peringatan jika ada campaign yang terdeteksi salah platform */}
+      {!loading && mismatchedCampaigns.length > 0 && (
+        <div style={{ background: '#FAEEDA', border: '0.5px solid #f5ce8a', borderRadius: 10, padding: '12px 16px', marginBottom: 12, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: '#633806' }}>
+              ⚠ {mismatchedCampaigns.length} campaign terdeteksi kemungkinan salah platform
+            </div>
+            <div style={{ fontSize: 11, color: '#854F0B', marginTop: 3 }}>
+              {mismatchedCampaigns.map(c => {
+                const guessed = guessplatformFromName(c.campaign_name)
+                return (
+                  <span key={c.id} style={{ display: 'inline-block', marginRight: 8 }}>
+                    <strong>{c.campaign_name}</strong>: tercatat sebagai <em>{c.platform_name}</em> → seharusnya <em>{guessed}</em>
+                  </span>
+                )
+              })}
+            </div>
+          </div>
+          <button
+            onClick={handleFixAllMismatches}
+            disabled={fixingAll || Object.keys(platformIdMap).length === 0}
+            style={{ padding: '7px 14px', fontSize: 11, fontWeight: 600, borderRadius: 6, border: 'none', background: fixingAll ? '#aaa' : '#633806', color: '#fff', cursor: fixingAll ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap' }}
+          >
+            {fixingAll ? 'Memperbaiki…' : 'Fix Semua Sekarang'}
+          </button>
         </div>
       )}
 
@@ -438,37 +513,39 @@ export default function UpdateSettingTab() {
               {!loading && filtered.map(c => {
                 const budget = c.daily_budget != null ? `${formatRp(c.daily_budget)}/day` : c.lifetime_budget != null ? `${formatRp(c.lifetime_budget)} total` : '—'
                 const isSaving = savingId === c.id
+                const guessed = guessplatformFromName(c.campaign_name)
+                const hasMismatch = guessed && guessed !== c.platform_name
                 return (
-                  <tr key={c.id} className="row-hover" style={{ background: 'transparent', transition: 'background .15s' }}>
-                    <td style={tdStyle}><span style={{ fontWeight: 500 }}>{c.campaign_name}</span></td>
+                  <tr key={c.id} className="row-hover" style={{ background: hasMismatch ? '#fffbf5' : 'transparent', transition: 'background .15s' }}>
                     <td style={tdStyle}>
-  <select
-    value={c.platform_name}
-    onChange={async e => {
-      const newPlatform = e.target.value
-      const { data: platformData } = await supabase
-        .from('dim_platforms')
-        .select('platform_id')
-        .eq('platform_name', newPlatform)
-        .single()
-      if (!platformData) return
-      setCampaigns(prev => prev.map(x => x.id === c.id ? { ...x, platform_name: newPlatform } : x))
-      await supabase.from('dim_campaigns').update({ platform_id: platformData.platform_id }).eq('campaign_id', c.id)
-      showToast(`Platform diubah ke "${newPlatform}".`)
-    }}
-    style={{
-      fontSize: 10, padding: '3px 8px', borderRadius: 99, fontWeight: 600,
-      background: PLATFORM_STYLE[c.platform_name]?.bg || '#f0f0f0',
-      color: PLATFORM_STYLE[c.platform_name]?.color || '#555',
-      border: `1px solid ${PLATFORM_STYLE[c.platform_name]?.bg || '#ccc'}`,
-      cursor: 'pointer', outline: 'none', appearance: 'none',
-      paddingRight: 20,
-    }}
-  >
-    {PLATFORM_LIST.map(p => <option key={p} value={p}>{p}</option>)}
-  </select>
-</td>
-
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ fontWeight: 500 }}>{c.campaign_name}</span>
+                        {/* FIX: ikon peringatan inline jika terdeteksi mismatch */}
+                        {hasMismatch && (
+                          <span title={`Nama mengandung "${guessed}" tapi tercatat sebagai ${c.platform_name}`}
+                            style={{ fontSize: 10, color: '#854F0B', background: '#FAEEDA', border: '0.5px solid #f5ce8a', borderRadius: 4, padding: '1px 5px', cursor: 'help', flexShrink: 0 }}>
+                            ⚠ cek platform
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td style={tdStyle}>
+                      {/* FIX: pakai handlePlatformChange yang sudah benar */}
+                      <select
+                        value={c.platform_name}
+                        onChange={e => handlePlatformChange(c.id, e.target.value)}
+                        style={{
+                          fontSize: 10, padding: '3px 8px', borderRadius: 99, fontWeight: 600,
+                          background: PLATFORM_STYLE[c.platform_name]?.bg || '#f0f0f0',
+                          color: PLATFORM_STYLE[c.platform_name]?.color || '#555',
+                          border: `1px solid ${PLATFORM_STYLE[c.platform_name]?.bg || '#ccc'}`,
+                          cursor: 'pointer', outline: 'none', appearance: 'none',
+                          paddingRight: 20,
+                        }}
+                      >
+                        {PLATFORM_LIST.map(p => <option key={p} value={p}>{p}</option>)}
+                      </select>
+                    </td>
                     <td style={{ ...tdStyle, color: '#555' }}>{c.objective}</td>
                     <td style={tdStyle}>
                       <StatusCycleButton status={c.status} saving={isSaving} onChange={newStatus => handleStatusChange(c.id, newStatus)} />
