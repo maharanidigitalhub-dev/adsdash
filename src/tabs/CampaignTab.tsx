@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ScatterChart, Scatter } from 'recharts'
 import type { GlobalData } from '../types/global'
@@ -72,7 +72,6 @@ export default function CampaignTab({
   globalData,
 }: {
   clientId?: string
-  // FIX: pakai GlobalData beneran, bukan unknown
   globalData?: GlobalData
 }) {
   const [campaigns, setCampaigns] = useState<CampaignRow[]>([])
@@ -81,16 +80,22 @@ export default function CampaignTab({
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
 
-  // FIX: ambil filters dari globalData
-  const filters = globalData?.filters
+  // Simpan filters di ref agar fetchData selalu akses nilai terbaru
+  const filtersRef = useRef(globalData?.filters)
+  filtersRef.current = globalData?.filters
 
-  // FIX: tambahkan filters sebagai dependency agar re-fetch saat filter berubah
+  // Ekstrak nilai primitif untuk dependency array — hindari object reference
+  const platform = globalData?.filters?.platform ?? 'All'
+  const dateFrom  = globalData?.filters?.dateRange?.from ?? ''
+  const dateTo    = globalData?.filters?.dateRange?.to ?? ''
+
   useEffect(() => {
     fetchData()
-  }, [clientId, filters?.platform, filters?.dateRange?.from, filters?.dateRange?.to])
+  }, [clientId, platform, dateFrom, dateTo])
 
   const fetchData = async () => {
     setLoading(true)
+    const filters = filtersRef.current
 
     let query = supabase
       .from('fact_daily_performance')
@@ -101,19 +106,18 @@ export default function CampaignTab({
         dim_campaigns(campaign_name, objective, status),
         dim_platforms(platform_name)
       `)
+      .order('report_date', { ascending: true })
 
-    // Filter client
     if (clientId !== 'all') query = query.eq('client_id', clientId)
 
-    // FIX: terapkan filter date range dari globalData
-    if (filters?.dateRange) {
+    // Terapkan date range dari globalData.filters
+    if (filters?.dateRange?.from && filters?.dateRange?.to) {
       query = query
         .gte('report_date', filters.dateRange.from)
         .lte('report_date', filters.dateRange.to)
     }
 
     const { data } = await query
-
     if (!data) { setLoading(false); return }
 
     const campMap: Record<string, CampaignRow> = {}
@@ -121,19 +125,19 @@ export default function CampaignTab({
 
     data.forEach((r: any) => {
       const id = r.campaign_id
-      const name = Array.isArray(r.dim_campaigns) ? r.dim_campaigns[0]?.campaign_name : r.dim_campaigns?.campaign_name
-      const objective = Array.isArray(r.dim_campaigns) ? r.dim_campaigns[0]?.objective : r.dim_campaigns?.objective
-      const status = Array.isArray(r.dim_campaigns) ? r.dim_campaigns[0]?.status : r.dim_campaigns?.status
-      const platform = Array.isArray(r.dim_platforms) ? r.dim_platforms[0]?.platform_name : r.dim_platforms?.platform_name
+      const name      = Array.isArray(r.dim_campaigns) ? r.dim_campaigns[0]?.campaign_name : r.dim_campaigns?.campaign_name
+      const objective = Array.isArray(r.dim_campaigns) ? r.dim_campaigns[0]?.objective     : r.dim_campaigns?.objective
+      const status    = Array.isArray(r.dim_campaigns) ? r.dim_campaigns[0]?.status        : r.dim_campaigns?.status
+      const p         = Array.isArray(r.dim_platforms) ? r.dim_platforms[0]?.platform_name : r.dim_platforms?.platform_name
 
       if (!campMap[id]) {
-        campMap[id] = { campaign_id: id, campaign_name: name, objective, status, platform_name: platform, spend: 0, impressions: 0, clicks: 0, conversions: 0, revenue: 0, ctr: 0, cpc: 0, cpa: 0, roas: 0 }
+        campMap[id] = { campaign_id: id, campaign_name: name, objective, status, platform_name: p, spend: 0, impressions: 0, clicks: 0, conversions: 0, revenue: 0, ctr: 0, cpc: 0, cpa: 0, roas: 0 }
       }
-      campMap[id].spend += Number(r.spend)
+      campMap[id].spend       += Number(r.spend)
       campMap[id].impressions += Number(r.impressions)
-      campMap[id].clicks += Number(r.clicks)
+      campMap[id].clicks      += Number(r.clicks)
       campMap[id].conversions += Number(r.conversions_7d_click)
-      campMap[id].revenue += Number(r.conversion_value)
+      campMap[id].revenue     += Number(r.conversion_value)
 
       const date = r.report_date?.slice(5)
       if (!dateMap[date]) dateMap[date] = {}
@@ -142,13 +146,13 @@ export default function CampaignTab({
 
     let campList = Object.values(campMap).map(c => ({
       ...c,
-      ctr: c.impressions > 0 ? c.clicks / c.impressions * 100 : 0,
-      cpc: c.clicks > 0 ? c.spend / c.clicks : 0,
-      cpa: c.conversions > 0 ? c.spend / c.conversions : 0,
-      roas: c.spend > 0 ? c.revenue / c.spend : 0,
+      ctr:  c.impressions > 0 ? c.clicks / c.impressions * 100 : 0,
+      cpc:  c.clicks > 0      ? c.spend / c.clicks             : 0,
+      cpa:  c.conversions > 0 ? c.spend / c.conversions        : 0,
+      roas: c.spend > 0       ? c.revenue / c.spend            : 0,
     }))
 
-    // FIX: filter platform di sini juga (untuk chart & tabel sekaligus)
+    // Filter platform (konsisten dengan App.tsx)
     if (filters?.platform && filters.platform !== 'All') {
       campList = campList.filter(c =>
         c.platform_name?.toLowerCase() === filters.platform.toLowerCase()
@@ -157,11 +161,11 @@ export default function CampaignTab({
 
     setCampaigns(campList)
 
-    // Rebuild dailyData hanya untuk campaign yang lolos filter platform
-    const filteredIds = new Set(campList.map(c => c.campaign_id))
+    // Rebuild daily chart hanya untuk campaign yang lolos filter platform
+    const validIds = new Set(campList.map(c => c.campaign_id))
     const filteredDateMap: Record<string, Record<string, number>> = {}
     data.forEach((r: any) => {
-      if (!filteredIds.has(r.campaign_id)) return
+      if (!validIds.has(r.campaign_id)) return
       const name = Array.isArray(r.dim_campaigns) ? r.dim_campaigns[0]?.campaign_name : r.dim_campaigns?.campaign_name
       const date = r.report_date?.slice(5)
       if (!filteredDateMap[date]) filteredDateMap[date] = {}
@@ -187,8 +191,8 @@ export default function CampaignTab({
   const campaignNames = [...new Set(dailyData.flatMap(d => Object.keys(d).filter(k => k !== 'date')))]
 
   const totalSpend = campaigns.reduce((s, c) => s + c.spend, 0)
-  const totalConv = campaigns.reduce((s, c) => s + c.conversions, 0)
-  const avgCTR = campaigns.length > 0 ? campaigns.reduce((s, c) => s + c.ctr, 0) / campaigns.length : 0
+  const totalConv  = campaigns.reduce((s, c) => s + c.conversions, 0)
+  const avgCTR  = campaigns.length > 0 ? campaigns.reduce((s, c) => s + c.ctr,  0) / campaigns.length : 0
   const avgROAS = campaigns.length > 0 ? campaigns.reduce((s, c) => s + c.roas, 0) / campaigns.length : 0
 
   const filtered = campaigns.filter(c =>
@@ -205,11 +209,11 @@ export default function CampaignTab({
       {/* KPI */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, minmax(0,1fr))', gap: '10px', marginBottom: '16px' }}>
         {[
-          { label: 'Active Campaigns', value: campaigns.filter(c => c.status === 'Active').length.toString(), delta: `${campaigns.length} total`, up: true },
-          { label: 'Total Spend', value: formatRp(totalSpend), delta: 'semua campaign', up: true },
-          { label: 'Avg CTR', value: `${avgCTR.toFixed(2)}%`, delta: 'rata-rata', up: avgCTR > 1.5 },
+          { label: 'Active Campaigns',  value: campaigns.filter(c => c.status === 'Active').length.toString(), delta: `${campaigns.length} total`, up: true },
+          { label: 'Total Spend',       value: formatRp(totalSpend), delta: 'semua campaign', up: true },
+          { label: 'Avg CTR',           value: `${avgCTR.toFixed(2)}%`, delta: 'rata-rata', up: avgCTR > 1.5 },
           { label: 'Total Conversions', value: totalConv.toString(), delta: '7d click', up: true },
-          { label: 'Avg ROAS', value: `${avgROAS.toFixed(2)}x`, delta: 'rata-rata', up: avgROAS >= 2 },
+          { label: 'Avg ROAS',          value: `${avgROAS.toFixed(2)}x`, delta: 'rata-rata', up: avgROAS >= 2 },
         ].map(k => (
           <div key={k.label} style={{ background: '#f0efea', borderRadius: '8px', padding: '12px 14px' }}>
             <div style={{ fontSize: '11px', color: '#888', marginBottom: '4px' }}>{k.label}</div>
@@ -271,14 +275,8 @@ export default function CampaignTab({
                   </div>
                 )
               }} />
-              {['Meta', 'Google', 'TikTok'].map(platform => (
-                <Scatter
-                  key={platform}
-                  name={platform}
-                  data={scatterData.filter(d => d.platform === platform)}
-                  fill={LINE_COLORS[platform] || '#B4B2A9'}
-                  fillOpacity={0.7}
-                />
+              {['Meta', 'Google', 'TikTok'].map(p => (
+                <Scatter key={p} name={p} data={scatterData.filter(d => d.platform === p)} fill={LINE_COLORS[p] || '#B4B2A9'} fillOpacity={0.7} />
               ))}
             </ScatterChart>
           </ResponsiveContainer>
