@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import TopBar from './components/TopBar'
 import TabNav from './components/TabNav'
@@ -38,10 +38,20 @@ function Dashboard() {
   const [dataLoading, setDataLoading] = useState(true)
   const [filters, setFilters] = useState<FilterState>(DEFAULT_FILTERS)
 
+  // FIX: simpan nilai terbaru filters & selectedClient di ref
+  // supaya fetchData selalu pakai nilai terkini tanpa perlu masuk dependency
+  const filtersRef = useRef<FilterState>(DEFAULT_FILTERS)
+  const selectedClientRef = useRef<string>('all')
+  const assignedClientIdsRef = useRef<string[]>([])
+
   const role = profile?.role ?? 'client'
   const canAccessAdmin = role === 'founder' || role === 'admin'
 
-  // Fetch data filtered by client IDs (for non-founder)
+  // Selalu sync ref ke state terbaru
+  useEffect(() => { filtersRef.current = filters }, [filters])
+  useEffect(() => { selectedClientRef.current = selectedClient }, [selectedClient])
+  useEffect(() => { assignedClientIdsRef.current = assignedClientIds }, [assignedClientIds])
+
   const fetchGlobalDataByIds = useCallback(async (
     clientIds: string[],
     clientId: string,
@@ -59,7 +69,6 @@ function Dashboard() {
         `)
         .order('report_date', { ascending: true })
 
-      // Filter by specific client or all assigned clients
       if (clientId !== 'all') {
         query = query.eq('client_id', clientId)
       } else if (clientIds.length > 0) {
@@ -101,7 +110,6 @@ function Dashboard() {
     setDataLoading(false)
   }, [])
 
-  // Fetch all data (founder only)
   const fetchGlobalDataAll = useCallback(async (activeFilters: FilterState) => {
     setDataLoading(true)
     try {
@@ -150,16 +158,28 @@ function Dashboard() {
     setDataLoading(false)
   }, [])
 
+  // FIX: helper yang selalu pakai nilai terkini dari ref
+  const refetch = useCallback(() => {
+    const f = filtersRef.current
+    const client = selectedClientRef.current
+    const ids = assignedClientIdsRef.current
+    if (role === 'founder') {
+      if (client === 'all') fetchGlobalDataAll(f)
+      else fetchGlobalDataByIds([], client, f)
+    } else {
+      fetchGlobalDataByIds(ids, client, f)
+    }
+  }, [role, fetchGlobalDataAll, fetchGlobalDataByIds])
+
   useEffect(() => {
     if (!user || !profile) return
 
     const initData = async () => {
       if (profile.role === 'founder') {
-        // Founder lihat semua
         setAssignedClientIds([])
-        fetchGlobalDataAll(filters)
+        // FIX: pakai filtersRef.current agar selalu up to date
+        fetchGlobalDataAll(filtersRef.current)
       } else {
-        // Admin & client: fetch assigned clients dari user_clients
         const { data: userClients } = await supabase
           .from('user_clients')
           .select('client_id')
@@ -167,6 +187,7 @@ function Dashboard() {
 
         const ids = userClients?.map((uc: any) => uc.client_id) || []
         setAssignedClientIds(ids)
+        assignedClientIdsRef.current = ids
 
         if (ids.length === 0) {
           setGlobalRows([])
@@ -176,63 +197,67 @@ function Dashboard() {
 
         if (ids.length === 1) {
           setSelectedClient(ids[0])
-          fetchGlobalDataByIds(ids, ids[0], filters)
+          selectedClientRef.current = ids[0]
+          fetchGlobalDataByIds(ids, ids[0], filtersRef.current)
         } else {
           setSelectedClient('all')
-          fetchGlobalDataByIds(ids, 'all', filters)
+          selectedClientRef.current = 'all'
+          fetchGlobalDataByIds(ids, 'all', filtersRef.current)
         }
       }
     }
 
     initData()
 
-    // Realtime
+    // Realtime: pakai refetch supaya selalu pakai filter terkini
     const channel = supabase
       .channel('db-changes')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'fact_daily_performance' }, () => {
-        initData()
+        refetch()
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'dim_campaigns' }, () => {
-        initData()
+        refetch()
       })
       .subscribe()
 
     return () => { supabase.removeChannel(channel) }
-  }, [user, profile])
+  }, [user, profile]) // tetap [user, profile] — initData hanya saat login
 
   const handleClientChange = (clientId: string) => {
     setSelectedClient(clientId)
+    selectedClientRef.current = clientId
+    const f = filtersRef.current
     if (role === 'founder') {
-      if (clientId === 'all') fetchGlobalDataAll(filters)
-      else fetchGlobalDataByIds([], clientId, filters)
+      if (clientId === 'all') fetchGlobalDataAll(f)
+      else fetchGlobalDataByIds([], clientId, f)
     } else {
-      fetchGlobalDataByIds(assignedClientIds, clientId, filters)
+      fetchGlobalDataByIds(assignedClientIdsRef.current, clientId, f)
     }
   }
 
   const handleFilterChange = (newFilters: FilterState) => {
+    // FIX: update state DAN ref sekaligus
     setFilters(newFilters)
+    filtersRef.current = newFilters
+
     if (newFilters.period === 'Custom' && !newFilters.dateRange) return
+
+    const client = selectedClientRef.current
+    const ids = assignedClientIdsRef.current
+
     if (role === 'founder') {
-      if (selectedClient === 'all') fetchGlobalDataAll(newFilters)
-      else fetchGlobalDataByIds([], selectedClient, newFilters)
+      if (client === 'all') fetchGlobalDataAll(newFilters)
+      else fetchGlobalDataByIds([], client, newFilters)
     } else {
-      fetchGlobalDataByIds(assignedClientIds, selectedClient, newFilters)
+      fetchGlobalDataByIds(ids, client, newFilters)
     }
   }
 
   const globalData: GlobalData = {
     rows: globalRows,
     loading: dataLoading,
-    refetch: () => {
-      if (role === 'founder') {
-        if (selectedClient === 'all') fetchGlobalDataAll(filters)
-        else fetchGlobalDataByIds([], selectedClient, filters)
-      } else {
-        fetchGlobalDataByIds(assignedClientIds, selectedClient, filters)
-      }
-    },
-    filters,
+    refetch,
+    filters, // FIX: selalu pakai state terbaru
   }
 
   return (
