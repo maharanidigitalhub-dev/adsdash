@@ -251,7 +251,7 @@ function Dashboard() {
       <main style={{ padding: '16px 20px' }}>
         {activeTab === 'overview'   && <OverviewTab globalData={globalData} />}
         {activeTab === 'campaign'   && <CampaignTab clientId={selectedClient} globalData={globalData} />}
-        {activeTab === 'creative'   && <CreativeTab clientId={selectedClient} globalData={globalData} />}
+        {activeTab === 'creative'   && <CreativeTab globalData={globalData} />}
         {activeTab === 'audience'   && <AudienceTab clientId={selectedClient} />}
         {activeTab === 'budget'     && <BudgetTab clientId={selectedClient} globalData={globalData} />}
         {activeTab === 'conversion' && <ConversionTab clientId={selectedClient} globalData={globalData} />}
