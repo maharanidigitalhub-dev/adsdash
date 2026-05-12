@@ -34,7 +34,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         .select('*')
         .eq('id', userId)
         .single()
-      return data as Profile || null
+      return (data as Profile) || null
     } catch {
       return null
     }
@@ -43,8 +43,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let mounted = true
 
+    const init = async () => {
+      // ✅ FIX: Baca session yang sudah ada di localStorage saat pertama load
+      // Tanpa ini, onAuthStateChange tidak trigger dan user dianggap belum login
+      const { data: { session } } = await supabase.auth.getSession()
+
+      if (!mounted) return
+
+      if (session?.user) {
+        setUser(session.user)
+        const p = await fetchProfile(session.user.id)
+        if (mounted) setProfile(p)
+      }
+
+      if (mounted) setLoading(false)
+    }
+
+    init()
+
+    // Listen perubahan auth (login, logout, token refresh)
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
       if (!mounted) return
+
       if (session?.user) {
         setUser(session.user)
         const p = await fetchProfile(session.user.id)
@@ -53,9 +73,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setUser(null)
         setProfile(null)
       }
+
       if (mounted) setLoading(false)
     })
 
+    // Fallback timeout kalau getSession hang
     const timeout = setTimeout(() => {
       if (mounted) setLoading(false)
     }, 5000)
