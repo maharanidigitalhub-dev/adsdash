@@ -18,6 +18,7 @@ interface CampaignRow {
   cpc: number
   cpa: number
   roas: number
+  hasData: boolean // true = ada data di periode ini, false = tidak ada
 }
 
 interface DailySpend {
@@ -79,6 +80,7 @@ export default function CampaignTab({
   const [scatterData, setScatterData] = useState<{ x: number; y: number; platform: string; name: string }[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
+  const [showNoData, setShowNoData] = useState(false)
 
   const filtersRef = useRef(globalData?.filters)
   filtersRef.current = globalData?.filters
@@ -95,24 +97,17 @@ export default function CampaignTab({
     setLoading(true)
     const filters = filtersRef.current
 
-    // FIX: Fetch campaign metadata (including correct platform) from dim_campaigns directly
-    // This ensures platform reflects what's stored in dim_campaigns, not fact_daily_performance
+    // Fetch ALL campaigns from dim_campaigns (not filtered by perf data)
     let campMetaQuery = supabase
       .from('dim_campaigns')
       .select('campaign_id, campaign_name, objective, status, dim_platforms(platform_name)')
 
     if (clientId !== 'all') campMetaQuery = campMetaQuery.eq('client_id', clientId)
 
-    // Apply platform filter at campaign level
-    if (filters?.platform && filters.platform !== 'All') {
-      // We'll filter after fetch using platform name
-    }
-
     const { data: campMeta } = await campMetaQuery
-
     if (!campMeta) { setLoading(false); return }
 
-    // Build a lookup map: campaign_id → { campaign_name, objective, status, platform_name }
+    // Build lookup map: campaign_id → metadata
     const campMetaMap: Record<string, { campaign_name: string; objective: string; status: string; platform_name: string }> = {}
     campMeta.forEach((c: any) => {
       const pName = Array.isArray(c.dim_platforms)
@@ -126,7 +121,7 @@ export default function CampaignTab({
       }
     })
 
-    // Fetch performance data
+    // Fetch performance data within date range
     let perfQuery = supabase
       .from('fact_daily_performance')
       .select('report_date, spend, impressions, clicks, conversions_7d_click, conversion_value, campaign_id')
@@ -143,13 +138,14 @@ export default function CampaignTab({
     const { data: perfData } = await perfQuery
     if (!perfData) { setLoading(false); return }
 
+    // Build campaign performance map from perf data
     const campMap: Record<string, CampaignRow> = {}
     const dateMap: Record<string, Record<string, number>> = {}
 
     perfData.forEach((r: any) => {
       const id = r.campaign_id
       const meta = campMetaMap[id]
-      if (!meta) return // skip if campaign not found in metadata
+      if (!meta) return
 
       if (!campMap[id]) {
         campMap[id] = {
@@ -157,9 +153,10 @@ export default function CampaignTab({
           campaign_name: meta.campaign_name,
           objective: meta.objective,
           status: meta.status,
-          platform_name: meta.platform_name, // FIX: platform from dim_campaigns, not fact table
+          platform_name: meta.platform_name,
           spend: 0, impressions: 0, clicks: 0, conversions: 0, revenue: 0,
           ctr: 0, cpc: 0, cpa: 0, roas: 0,
+          hasData: true,
         }
       }
       campMap[id].spend       += Number(r.spend)
@@ -174,13 +171,32 @@ export default function CampaignTab({
       dateMap[date][name] = (dateMap[date][name] || 0) + Number(r.spend)
     })
 
-    let campList = Object.values(campMap).map(c => ({
+    // Campaigns with perf data: compute ratios
+    let campList: CampaignRow[] = Object.values(campMap).map(c => ({
       ...c,
       ctr:  c.impressions > 0 ? c.clicks / c.impressions * 100 : 0,
       cpc:  c.clicks > 0      ? c.spend / c.clicks             : 0,
       cpa:  c.conversions > 0 ? c.spend / c.conversions        : 0,
       roas: c.spend > 0       ? c.revenue / c.spend            : 0,
     }))
+
+    // Add campaigns from dim_campaigns that have NO data in this period
+    campMeta.forEach((c: any) => {
+      if (campMap[c.campaign_id]) return // already in list
+      const pName = Array.isArray(c.dim_platforms)
+        ? c.dim_platforms[0]?.platform_name
+        : c.dim_platforms?.platform_name
+      campList.push({
+        campaign_id: c.campaign_id,
+        campaign_name: c.campaign_name,
+        objective: c.objective ?? '—',
+        status: c.status ?? 'Active',
+        platform_name: pName ?? '—',
+        spend: 0, impressions: 0, clicks: 0, conversions: 0, revenue: 0,
+        ctr: 0, cpc: 0, cpa: 0, roas: 0,
+        hasData: false,
+      })
+    })
 
     // Apply platform filter
     if (filters?.platform && filters.platform !== 'All') {
@@ -191,8 +207,8 @@ export default function CampaignTab({
 
     setCampaigns(campList)
 
-    // Rebuild daily chart only for campaigns that passed the filter
-    const validIds = new Set(campList.map(c => c.campaign_id))
+    // Daily chart: only campaigns with data
+    const validIds = new Set(campList.filter(c => c.hasData).map(c => c.campaign_id))
     const filteredDateMap: Record<string, Record<string, number>> = {}
     perfData.forEach((r: any) => {
       if (!validIds.has(r.campaign_id)) return
@@ -209,7 +225,8 @@ export default function CampaignTab({
       .map(([date, vals]) => ({ date, ...vals }))
     setDailyData(daily)
 
-    const scatter = campList.map(c => ({
+    // Scatter: only campaigns with data
+    const scatter = campList.filter(c => c.hasData).map(c => ({
       x: Math.round(c.cpc),
       y: parseFloat(c.ctr.toFixed(2)),
       platform: c.platform_name,
@@ -222,12 +239,17 @@ export default function CampaignTab({
 
   const campaignNames = [...new Set(dailyData.flatMap(d => Object.keys(d).filter(k => k !== 'date')))]
 
-  const totalSpend = campaigns.reduce((s, c) => s + c.spend, 0)
-  const totalConv  = campaigns.reduce((s, c) => s + c.conversions, 0)
-  const avgCTR  = campaigns.length > 0 ? campaigns.reduce((s, c) => s + c.ctr,  0) / campaigns.length : 0
-  const avgROAS = campaigns.length > 0 ? campaigns.reduce((s, c) => s + c.roas, 0) / campaigns.length : 0
+  const campaignsWithData    = campaigns.filter(c => c.hasData)
+  const campaignsWithoutData = campaigns.filter(c => !c.hasData)
 
-  const filtered = campaigns.filter(c =>
+  const totalSpend = campaignsWithData.reduce((s, c) => s + c.spend, 0)
+  const totalConv  = campaignsWithData.reduce((s, c) => s + c.conversions, 0)
+  const avgCTR  = campaignsWithData.length > 0 ? campaignsWithData.reduce((s, c) => s + c.ctr,  0) / campaignsWithData.length : 0
+  const avgROAS = campaignsWithData.length > 0 ? campaignsWithData.reduce((s, c) => s + c.roas, 0) / campaignsWithData.length : 0
+
+  // Table: always show campaigns with data; show no-data campaigns only if toggle on
+  const tableSource = showNoData ? campaigns : campaignsWithData
+  const filtered = tableSource.filter(c =>
     c.campaign_name?.toLowerCase().includes(search.toLowerCase())
   )
 
@@ -241,7 +263,12 @@ export default function CampaignTab({
       {/* KPI */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, minmax(0,1fr))', gap: '10px', marginBottom: '16px' }}>
         {[
-          { label: 'Active Campaigns',  value: campaigns.filter(c => c.status === 'Active').length.toString(), delta: `${campaigns.length} total`, up: true },
+          {
+            label: 'Active Campaigns',
+            value: campaigns.filter(c => c.status === 'Active').length.toString(),
+            delta: `${campaignsWithData.length} ada data · ${campaignsWithoutData.length} tanpa data`,
+            up: true,
+          },
           { label: 'Total Spend',       value: formatRp(totalSpend), delta: 'semua campaign', up: true },
           { label: 'Avg CTR',           value: `${avgCTR.toFixed(2)}%`, delta: 'rata-rata', up: avgCTR > 1.5 },
           { label: 'Total Conversions', value: totalConv.toString(), delta: '7d click', up: true },
@@ -324,14 +351,50 @@ export default function CampaignTab({
 
       {/* Table */}
       <div style={{ background: '#fff', border: '0.5px solid rgba(0,0,0,0.08)', borderRadius: '12px', padding: '14px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap', gap: '8px' }}>
           <div style={{ fontSize: '12px', fontWeight: 500 }}>Campaign performance table</div>
-          <input
-            value={search} onChange={e => setSearch(e.target.value)}
-            placeholder="Cari campaign..."
-            style={{ padding: '6px 10px', fontSize: '11px', border: '0.5px solid rgba(0,0,0,0.15)', borderRadius: '6px', outline: 'none', width: '200px' }}
-          />
+
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+
+            {/* Toggle: tampilkan campaign tanpa data */}
+            {campaignsWithoutData.length > 0 && (
+              <button
+                onClick={() => setShowNoData(v => !v)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: '6px',
+                  padding: '5px 10px', fontSize: '11px', borderRadius: '6px', cursor: 'pointer',
+                  border: showNoData ? '1.5px solid #854F0B' : '0.5px solid rgba(0,0,0,0.15)',
+                  background: showNoData ? '#FAEEDA' : '#fff',
+                  color: showNoData ? '#854F0B' : '#888',
+                  fontWeight: showNoData ? 500 : 400,
+                  transition: 'all 0.15s',
+                }}
+              >
+                {/* Toggle pill */}
+                <span style={{
+                  width: '28px', height: '15px', borderRadius: '99px', position: 'relative', flexShrink: 0,
+                  background: showNoData ? '#854F0B' : '#d0cfc9',
+                  transition: 'background 0.2s',
+                }}>
+                  <span style={{
+                    position: 'absolute', top: '2px',
+                    left: showNoData ? '15px' : '2px',
+                    width: '11px', height: '11px', borderRadius: '50%', background: '#fff',
+                    transition: 'left 0.2s',
+                  }} />
+                </span>
+                Tampilkan tanpa data ({campaignsWithoutData.length})
+              </button>
+            )}
+
+            <input
+              value={search} onChange={e => setSearch(e.target.value)}
+              placeholder="Cari campaign..."
+              style={{ padding: '6px 10px', fontSize: '11px', border: '0.5px solid rgba(0,0,0,0.15)', borderRadius: '6px', outline: 'none', width: '180px' }}
+            />
+          </div>
         </div>
+
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '11.5px' }}>
             <thead>
@@ -349,22 +412,42 @@ export default function CampaignTab({
                   </td>
                 </tr>
               ) : filtered.map((row, i) => (
-                <tr key={row.campaign_id} style={{ background: i % 2 === 1 ? '#fafaf9' : '#fff' }}>
-                  <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 500 }}>{row.campaign_name}</td>
+                <tr key={row.campaign_id} style={{
+                  background: !row.hasData ? '#fdfcf9' : i % 2 === 1 ? '#fafaf9' : '#fff',
+                  opacity: row.hasData ? 1 : 0.6,
+                }}>
+                  <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 500 }}>
+                    {row.campaign_name}
+                    {!row.hasData && (
+                      <span style={{ marginLeft: '6px', fontSize: '9px', padding: '1px 5px', borderRadius: '4px', background: '#F1EFE8', color: '#999', fontWeight: 400, verticalAlign: 'middle' }}>
+                        no data
+                      </span>
+                    )}
+                  </td>
                   <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)' }}>{platformBadge(row.platform_name)}</td>
                   <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)', color: '#888', fontSize: '11px' }}>{row.objective}</td>
                   <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)' }}>{statusBadge(row.status)}</td>
-                  <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)' }}>{formatRp(row.spend)}</td>
-                  <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)' }}>{(row.impressions / 1000).toFixed(1)}K</td>
-                  <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)' }}>{row.ctr.toFixed(2)}%</td>
-                  <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)' }}>{formatRp(row.cpc)}</td>
-                  <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)' }}>{row.conversions}</td>
-                  <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)' }}>{formatRp(row.cpa)}</td>
-                  <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)', color: getRoasColor(row.roas), fontWeight: 500 }}>{row.roas.toFixed(2)}x</td>
+                  <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)' }}>{row.hasData ? formatRp(row.spend) : '—'}</td>
+                  <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)' }}>{row.hasData ? `${(row.impressions / 1000).toFixed(1)}K` : '—'}</td>
+                  <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)' }}>{row.hasData ? `${row.ctr.toFixed(2)}%` : '—'}</td>
+                  <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)' }}>{row.hasData ? formatRp(row.cpc) : '—'}</td>
+                  <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)' }}>{row.hasData ? row.conversions : '—'}</td>
+                  <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)' }}>{row.hasData ? formatRp(row.cpa) : '—'}</td>
+                  <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)', color: row.hasData ? getRoasColor(row.roas) : '#bbb', fontWeight: row.hasData ? 500 : 400 }}>
+                    {row.hasData ? `${row.roas.toFixed(2)}x` : '—'}
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
+        </div>
+
+        {/* Footer count */}
+        <div style={{ marginTop: '10px', fontSize: '11px', color: '#aaa', textAlign: 'right' }}>
+          {showNoData
+            ? `${campaignsWithData.length} ada data · ${campaignsWithoutData.length} tanpa data · ${campaigns.length} total`
+            : `${campaignsWithData.length} campaign dengan data di periode ini${campaignsWithoutData.length > 0 ? ` · ${campaignsWithoutData.length} disembunyikan` : ''}`
+          }
         </div>
       </div>
     </div>
