@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ScatterChart, Scatter } from 'recharts'
+import type { GlobalData } from '../types/global'
 
 interface CampaignRow {
   campaign_id: string
@@ -66,32 +67,52 @@ const LINE_COLORS: Record<string, string> = {
   TikTok: '#888780',
 }
 
-export default function CampaignTab({ clientId = 'all', globalData: _globalData }: { clientId?: string; globalData?: unknown }) {
+export default function CampaignTab({
+  clientId = 'all',
+  globalData,
+}: {
+  clientId?: string
+  // FIX: pakai GlobalData beneran, bukan unknown
+  globalData?: GlobalData
+}) {
   const [campaigns, setCampaigns] = useState<CampaignRow[]>([])
   const [dailyData, setDailyData] = useState<DailySpend[]>([])
   const [scatterData, setScatterData] = useState<{ x: number; y: number; platform: string; name: string }[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
 
+  // FIX: ambil filters dari globalData
+  const filters = globalData?.filters
+
+  // FIX: tambahkan filters sebagai dependency agar re-fetch saat filter berubah
   useEffect(() => {
     fetchData()
-  }, [clientId])
+  }, [clientId, filters?.platform, filters?.dateRange?.from, filters?.dateRange?.to])
 
   const fetchData = async () => {
     setLoading(true)
 
     let query = supabase
-  .from('fact_daily_performance')
-  .select(`
-    report_date, spend, impressions, clicks,
-    conversions_7d_click, conversion_value,
-    campaign_id,
-    dim_campaigns(campaign_name, objective, status),
-    dim_platforms(platform_name)
-  `)
+      .from('fact_daily_performance')
+      .select(`
+        report_date, spend, impressions, clicks,
+        conversions_7d_click, conversion_value,
+        campaign_id,
+        dim_campaigns(campaign_name, objective, status),
+        dim_platforms(platform_name)
+      `)
 
-if (clientId !== 'all') query = query.eq('client_id', clientId)
-const { data } = await query
+    // Filter client
+    if (clientId !== 'all') query = query.eq('client_id', clientId)
+
+    // FIX: terapkan filter date range dari globalData
+    if (filters?.dateRange) {
+      query = query
+        .gte('report_date', filters.dateRange.from)
+        .lte('report_date', filters.dateRange.to)
+    }
+
+    const { data } = await query
 
     if (!data) { setLoading(false); return }
 
@@ -119,7 +140,7 @@ const { data } = await query
       dateMap[date][name] = (dateMap[date][name] || 0) + Number(r.spend)
     })
 
-    const campList = Object.values(campMap).map(c => ({
+    let campList = Object.values(campMap).map(c => ({
       ...c,
       ctr: c.impressions > 0 ? c.clicks / c.impressions * 100 : 0,
       cpc: c.clicks > 0 ? c.spend / c.clicks : 0,
@@ -127,9 +148,27 @@ const { data } = await query
       roas: c.spend > 0 ? c.revenue / c.spend : 0,
     }))
 
+    // FIX: filter platform di sini juga (untuk chart & tabel sekaligus)
+    if (filters?.platform && filters.platform !== 'All') {
+      campList = campList.filter(c =>
+        c.platform_name?.toLowerCase() === filters.platform.toLowerCase()
+      )
+    }
+
     setCampaigns(campList)
 
-    const daily = Object.entries(dateMap)
+    // Rebuild dailyData hanya untuk campaign yang lolos filter platform
+    const filteredIds = new Set(campList.map(c => c.campaign_id))
+    const filteredDateMap: Record<string, Record<string, number>> = {}
+    data.forEach((r: any) => {
+      if (!filteredIds.has(r.campaign_id)) return
+      const name = Array.isArray(r.dim_campaigns) ? r.dim_campaigns[0]?.campaign_name : r.dim_campaigns?.campaign_name
+      const date = r.report_date?.slice(5)
+      if (!filteredDateMap[date]) filteredDateMap[date] = {}
+      filteredDateMap[date][name] = (filteredDateMap[date][name] || 0) + Number(r.spend)
+    })
+
+    const daily = Object.entries(filteredDateMap)
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([date, vals]) => ({ date, ...vals }))
     setDailyData(daily)
@@ -192,7 +231,7 @@ const { data } = await query
               <XAxis dataKey="date" tick={{ fontSize: 9 }} tickLine={false} axisLine={false} interval={Math.floor(dailyData.length / 6)} />
               <YAxis tick={{ fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => `${(v / 1000).toFixed(0)}K`} />
               <Tooltip formatter={(v: number) => formatRp(v)} />
-              {campaignNames.map((name, i) => {
+              {campaignNames.map((name) => {
                 const camp = campaigns.find(c => c.campaign_name === name)
                 const color = LINE_COLORS[camp?.platform_name || ''] || '#B4B2A9'
                 return <Line key={name} type="monotone" dataKey={name} stroke={color} strokeWidth={2} dot={false} />
@@ -273,7 +312,13 @@ const { data } = await query
               </tr>
             </thead>
             <tbody>
-              {filtered.map((row, i) => (
+              {filtered.length === 0 ? (
+                <tr>
+                  <td colSpan={11} style={{ padding: '24px', textAlign: 'center', color: '#aaa', fontSize: '12px' }}>
+                    Tidak ada campaign untuk filter yang dipilih
+                  </td>
+                </tr>
+              ) : filtered.map((row, i) => (
                 <tr key={row.campaign_id} style={{ background: i % 2 === 1 ? '#fafaf9' : '#fff' }}>
                   <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 500 }}>{row.campaign_name}</td>
                   <td style={{ padding: '6px 8px', borderBottom: '0.5px solid rgba(0,0,0,0.05)' }}>{platformBadge(row.platform_name)}</td>
