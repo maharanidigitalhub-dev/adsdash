@@ -11,8 +11,16 @@ interface Client {
 interface Campaign {
   campaign_id: string
   campaign_name: string
-  platform_id: number
-  dim_platforms: { platform_name: string } | { platform_name: string }[]
+  platform_id: string
+  platform_name: string
+  objective: string
+  status: string
+  daily_budget: number | null
+  lifetime_budget: number | null
+  target_roas: number | null
+  target_cpa: number | null
+  start_date: string | null
+  end_date: string | null
 }
 
 interface PerformanceForm {
@@ -59,6 +67,11 @@ interface CsvRow {
   [key: string]: string | undefined
 }
 
+// Platform detected per CSV row (overrideable by user)
+interface CsvRowWithPlatform extends CsvRow {
+  _resolvedPlatform: string
+}
+
 const emptyForm: PerformanceForm = {
   client_id: '', platform: '', campaign_id: '', report_date: '',
   impressions: '', reach: '', clicks: '', spend: '',
@@ -66,6 +79,21 @@ const emptyForm: PerformanceForm = {
 }
 
 const PLATFORMS = ['Meta', 'Google', 'TikTok']
+
+const PLATFORM_STYLE: Record<string, { bg: string; color: string; active: string }> = {
+  Meta:   { bg: '#E6F1FB', color: '#185FA5', active: '#185FA5' },
+  Google: { bg: '#FCEBEB', color: '#A32D2D', active: '#A32D2D' },
+  TikTok: { bg: '#F1EFE8', color: '#444441', active: '#444441' },
+}
+
+// Detect platform from campaign name prefix
+function detectPlatformFromName(name: string): string | null {
+  const n = (name || '').toUpperCase()
+  if (n.includes('_GAD_') || n.startsWith('GAD_') || n.includes('GAD')) return 'Google'
+  if (n.includes('_TT_') || n.startsWith('TT_') || n.includes('_TT')) return 'TikTok'
+  if (n.includes('_FB_') || n.includes('_META_') || n.startsWith('FB_')) return 'Meta'
+  return null
+}
 
 function Label({ children, required }: { children: string; required?: boolean }) {
   return (
@@ -78,7 +106,7 @@ function Label({ children, required }: { children: string; required?: boolean })
 function Input({ value, onChange, type = 'text', placeholder }: { value: string; onChange: (v: string) => void; type?: string; placeholder?: string }) {
   return (
     <input type={type} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
-      style={{ width: '100%', padding: '8px 10px', fontSize: '12px', border: '0.5px solid rgba(0,0,0,0.2)', borderRadius: '6px', background: '#fff', color: '#1a1a1a', outline: 'none' }} />
+      style={{ width: '100%', padding: '8px 10px', fontSize: '12px', border: '0.5px solid rgba(0,0,0,0.2)', borderRadius: '6px', background: '#fff', color: '#1a1a1a', outline: 'none', boxSizing: 'border-box' }} />
   )
 }
 
@@ -102,13 +130,33 @@ function SelectField({ value, onChange, options, placeholder }: { value: string;
 }
 
 function platformBadge(p: string) {
-  const map: Record<string, { bg: string; color: string }> = {
-    Meta: { bg: '#E6F1FB', color: '#185FA5' },
-    Google: { bg: '#FCEBEB', color: '#A32D2D' },
-    TikTok: { bg: '#F1EFE8', color: '#444441' },
-  }
-  const s = map[p] || { bg: '#F1EFE8', color: '#444441' }
-  return <span style={{ fontSize: '10px', padding: '1px 6px', borderRadius: '99px', fontWeight: 500, background: s.bg, color: s.color }}>{p}</span>
+  const s = PLATFORM_STYLE[p] || { bg: '#F1EFE8', color: '#444441' }
+  return <span style={{ fontSize: '10px', padding: '1px 6px', borderRadius: '99px', fontWeight: 500, background: s.bg, color: s.color }}>{p || '—'}</span>
+}
+
+// Compact platform toggle buttons (reused in multiple places)
+function PlatformToggle({ value, onChange }: { value: string; onChange: (p: string) => void }) {
+  return (
+    <div style={{ display: 'flex', gap: '8px' }}>
+      {PLATFORMS.map(p => {
+        const s = PLATFORM_STYLE[p]
+        const isActive = value === p
+        return (
+          <button key={p} onClick={() => onChange(p)}
+            style={{
+              flex: 1, padding: '7px 4px', borderRadius: '6px', cursor: 'pointer', fontSize: '11px',
+              fontWeight: isActive ? 600 : 400,
+              border: isActive ? `1.5px solid ${s.active}` : '0.5px solid rgba(0,0,0,0.12)',
+              background: isActive ? s.bg : '#fff',
+              color: isActive ? s.color : '#555',
+              transition: 'all 0.12s',
+            }}>
+            {p}
+          </button>
+        )
+      })}
+    </div>
+  )
 }
 
 export default function DataInputTab() {
@@ -126,13 +174,13 @@ export default function DataInputTab() {
   const [savingClient, setSavingClient] = useState(false)
 
   const [csvFile, setCsvFile] = useState<File | null>(null)
-  const [csvData, setCsvData] = useState<CsvRow[]>([])
-  const [csvPreview, setCsvPreview] = useState<{ matched: number; unmatched: string[]; rows: CsvRow[] }>({ matched: 0, unmatched: [], rows: [] })
+  const [csvRows, setCsvRows] = useState<CsvRowWithPlatform[]>([])
+  const [csvPreview, setCsvPreview] = useState<{ matched: number; newCampaigns: string[]; rows: CsvRowWithPlatform[] }>({ matched: 0, newCampaigns: [], rows: [] })
   const [loadingCsv, setLoadingCsv] = useState(false)
   const [analyzingCsv, setAnalyzingCsv] = useState(false)
-
-  // CSV import: pilih client untuk auto-create campaign
   const [csvClientId, setCsvClientId] = useState('')
+  // Default platform for CSV rows that can't be auto-detected
+  const [csvDefaultPlatform, setCsvDefaultPlatform] = useState('Meta')
 
   useEffect(() => { fetchClients(); fetchRecentData() }, [])
 
@@ -155,7 +203,7 @@ export default function DataInputTab() {
       .eq('client_id', clientId)
       .eq('platform_id', platformData.platform_id)
       .eq('status', 'Active')
-    if (data) setCampaigns(data as Campaign[])
+    if (data) setCampaigns(data as unknown as Campaign[])
   }
 
   const fetchRecentData = async () => {
@@ -165,7 +213,7 @@ export default function DataInputTab() {
       .select('record_id, report_date, spend, impressions, clicks, conversions_7d_click, conversion_value, dim_campaigns(campaign_name), dim_platforms(platform_name)')
       .order('report_date', { ascending: false })
       .limit(30)
-    if (data) setRecentData(data as RecentRecord[])
+    if (data) setRecentData(data as unknown as RecentRecord[])
     setLoadingRecent(false)
   }
 
@@ -231,6 +279,20 @@ export default function DataInputTab() {
     }).filter(row => Object.values(row).some(v => v !== ''))
   }
 
+  // Update _resolvedPlatform for all rows that don't have a CSV-column platform
+  // when csvDefaultPlatform changes
+  const updateRowPlatforms = (rows: CsvRowWithPlatform[], defaultPlatform: string): CsvRowWithPlatform[] => {
+    return rows.map(row => {
+      const csvPlatform = row.platform?.trim()
+      const detected = detectPlatformFromName(row.campaign_name || '')
+      // Priority: explicit CSV column > name detection > user-selected default
+      const resolved = (csvPlatform && PLATFORMS.includes(csvPlatform)) ? csvPlatform
+        : detected ? detected
+        : defaultPlatform
+      return { ...row, _resolvedPlatform: resolved }
+    })
+  }
+
   const handleCsvUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
@@ -242,35 +304,67 @@ export default function DataInputTab() {
     const reader = new FileReader()
     reader.onload = async (ev) => {
       const text = ev.target?.result as string
-      const rows = parseCsv(text)
-      setCsvData(rows)
+      const rawRows = parseCsv(text)
 
-      const campaignNames = [...new Set(rows.map(r => r.campaign_name).filter(Boolean))]
-      const unmatched: string[] = []
+      // Resolve platforms for each row
+      const resolvedRows: CsvRowWithPlatform[] = rawRows.map(row => {
+        const csvPlatform = row.platform?.trim()
+        const detected = detectPlatformFromName(row.campaign_name || '')
+        const resolved = (csvPlatform && PLATFORMS.includes(csvPlatform)) ? csvPlatform
+          : detected ? detected
+          : csvDefaultPlatform
+        return { ...row, _resolvedPlatform: resolved }
+      })
 
+      setCsvRows(resolvedRows)
+
+      const campaignNames = [...new Set(resolvedRows.map(r => r.campaign_name).filter(Boolean))]
       const { data: allCampaigns } = await supabase
         .from('dim_campaigns')
         .select('campaign_id, campaign_name')
 
+      const newCampaigns: string[] = []
       campaignNames.forEach(name => {
         const found = allCampaigns?.find(c => c.campaign_name?.toLowerCase() === name?.toLowerCase())
-        if (!found) unmatched.push(`Campaign baru akan dibuat: "${name}"`)
+        if (!found) newCampaigns.push(name as string)
       })
 
-      setCsvPreview({ matched: rows.length, unmatched, rows: rows.slice(0, 5) })
+      setCsvPreview({ matched: resolvedRows.length, newCampaigns, rows: resolvedRows.slice(0, 5) })
       setAnalyzingCsv(false)
     }
     reader.readAsText(file)
   }
 
+  // When default platform changes, re-resolve all rows
+  const handleDefaultPlatformChange = (p: string) => {
+    setCsvDefaultPlatform(p)
+    if (csvRows.length > 0) {
+      const updated = updateRowPlatforms(csvRows, p)
+      setCsvRows(updated)
+      setCsvPreview(prev => ({ ...prev, rows: updated.slice(0, 5) }))
+    }
+  }
+
+  // Allow user to override platform for a specific preview row
+  const handleRowPlatformOverride = (rowIndex: number, newPlatform: string) => {
+    setCsvRows(prev => {
+      const updated = [...prev]
+      updated[rowIndex] = { ...updated[rowIndex], _resolvedPlatform: newPlatform }
+      return updated
+    })
+    setCsvPreview(prev => ({
+      ...prev,
+      rows: prev.rows.map((r, i) => i === rowIndex ? { ...r, _resolvedPlatform: newPlatform } : r),
+    }))
+  }
+
   const handleCsvImport = async () => {
-    if (csvData.length === 0) { setErrorMsg('Tidak ada data CSV'); return }
+    if (csvRows.length === 0) { setErrorMsg('Tidak ada data CSV'); return }
     if (!csvClientId) { setErrorMsg('Pilih client untuk import CSV ini'); return }
     setLoadingCsv(true)
     setErrorMsg('')
     setSuccessMsg('')
 
-    // Fetch semua referensi
     const { data: allCampaigns } = await supabase
       .from('dim_campaigns')
       .select('campaign_id, campaign_name, client_id, platform_id')
@@ -279,10 +373,7 @@ export default function DataInputTab() {
       .from('dim_platforms')
       .select('platform_id, platform_name')
 
-    // Cache campaign yang sudah dibuat dalam sesi ini
     const campaignCache: Record<string, string> = {}
-
-    // Pre-populate cache dari DB
     allCampaigns?.forEach(c => {
       campaignCache[c.campaign_name?.toLowerCase()] = c.campaign_id
     })
@@ -290,21 +381,22 @@ export default function DataInputTab() {
     const errors: string[] = []
     const rowsToInsert: Record<string, unknown>[] = []
 
-    for (const row of csvData) {
+    for (const row of csvRows) {
       const campaignName = row.campaign_name?.trim() || ''
-      const platformName = row.platform?.trim() || 'Meta' // default Meta
       const reportDate = row.report_date || row.date || ''
+      // Use the resolved platform (from CSV column, name detection, or default)
+      const platformName = row._resolvedPlatform || csvDefaultPlatform
 
       if (!campaignName) { errors.push('Baris tanpa campaign_name dilewati'); continue }
       if (!reportDate) { errors.push('Baris tanpa tanggal dilewati'); continue }
 
-      // Cari atau buat campaign
       let campaignId = campaignCache[campaignName.toLowerCase()]
 
       if (!campaignId) {
-        // Auto-create campaign
-        const platform = allPlatforms?.find(p => p.platform_name?.toLowerCase() === platformName.toLowerCase())
-          || allPlatforms?.find(p => p.platform_name === 'Meta') // fallback Meta
+        // Auto-create campaign with the correctly resolved platform
+        const platform = allPlatforms?.find(p =>
+          p.platform_name?.toLowerCase() === platformName.toLowerCase()
+        ) || allPlatforms?.find(p => p.platform_name === 'Meta')
 
         if (!platform) { errors.push(`Platform tidak ditemukan untuk "${campaignName}"`); continue }
 
@@ -330,7 +422,6 @@ export default function DataInputTab() {
         campaignCache[campaignName.toLowerCase()] = campaignId
       }
 
-      // Cari platform_id dari campaign atau dari kolom platform di CSV
       const platform = allPlatforms?.find(p =>
         p.platform_name?.toLowerCase() === platformName.toLowerCase()
       ) || allPlatforms?.[0]
@@ -360,11 +451,11 @@ export default function DataInputTab() {
     if (error) {
       setErrorMsg('Gagal import: ' + error.message)
     } else {
-      const skipped = csvData.length - rowsToInsert.length
+      const skipped = csvRows.length - rowsToInsert.length
       setSuccessMsg(`${rowsToInsert.length} baris berhasil diimport!${skipped > 0 ? ` (${skipped} dilewati)` : ''}`)
       setCsvFile(null)
-      setCsvData([])
-      setCsvPreview({ matched: 0, unmatched: [], rows: [] })
+      setCsvRows([])
+      setCsvPreview({ matched: 0, newCampaigns: [], rows: [] })
       setCsvClientId('')
       fetchRecentData()
     }
@@ -384,6 +475,13 @@ export default function DataInputTab() {
       return updated
     })
   }
+
+  // Count rows by platform for summary
+  const platformSummary = csvRows.reduce<Record<string, number>>((acc, row) => {
+    const p = row._resolvedPlatform || 'Unknown'
+    acc[p] = (acc[p] || 0) + 1
+    return acc
+  }, {})
 
   return (
     <div style={{ maxWidth: '1100px', margin: '0 auto' }}>
@@ -421,21 +519,8 @@ export default function DataInputTab() {
           </div>
           <div>
             <Label required>2. Platform</Label>
-            <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
-              {PLATFORMS.map(p => {
-                const colors: Record<string, { active: string; bg: string }> = {
-                  Meta: { active: '#185FA5', bg: '#E6F1FB' },
-                  Google: { active: '#A32D2D', bg: '#FCEBEB' },
-                  TikTok: { active: '#444441', bg: '#F1EFE8' },
-                }
-                const isActive = form.platform === p
-                return (
-                  <button key={p} onClick={() => set('platform', p)}
-                    style={{ flex: 1, padding: '7px 4px', borderRadius: '6px', cursor: 'pointer', fontSize: '11px', fontWeight: isActive ? 500 : 400, border: isActive ? `1.5px solid ${colors[p].active}` : '0.5px solid rgba(0,0,0,0.12)', background: isActive ? colors[p].bg : '#fff', color: isActive ? colors[p].active : '#555' }}>
-                    {p}
-                  </button>
-                )
-              })}
+            <div style={{ marginTop: '4px' }}>
+              <PlatformToggle value={form.platform} onChange={v => set('platform', v)} />
             </div>
           </div>
           <div>
@@ -467,21 +552,28 @@ export default function DataInputTab() {
             campaign_name, platform, report_date, impressions, reach, clicks, spend, conversions_7d_click, conversion_value, purchases
           </code>
           <div style={{ fontSize: '10px', color: '#888', marginTop: '6px' }}>
-            Kolom <strong>campaign_name</strong> wajib ada. Kalau campaign belum ada di sistem, akan otomatis dibuat.
-            Kolom <strong>platform</strong> opsional (default: Meta).
+            Kolom <strong>platform</strong> opsional — jika ada, akan digunakan langsung. Jika tidak ada, sistem akan deteksi dari nama campaign (GAD_ → Google, TT_ → TikTok, FB_ → Meta) atau gunakan platform default di bawah.
           </div>
         </div>
 
-        {/* Pilih Client untuk CSV */}
-        <div style={{ marginBottom: '14px' }}>
-          <Label required>Client untuk import ini</Label>
-          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+        {/* Client + Default Platform selection */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '16px' }}>
+          <div>
+            <Label required>Client untuk import ini</Label>
             <select value={csvClientId} onChange={e => setCsvClientId(e.target.value)}
-              style={{ padding: '8px 10px', fontSize: '12px', border: '0.5px solid rgba(0,0,0,0.2)', borderRadius: '6px', background: '#fff', outline: 'none', minWidth: '200px' }}>
+              style={{ width: '100%', padding: '8px 10px', fontSize: '12px', border: '0.5px solid rgba(0,0,0,0.2)', borderRadius: '6px', background: '#fff', outline: 'none' }}>
               <option value="">— Pilih Client —</option>
               {clients.map(c => <option key={c.client_id} value={c.client_id}>{c.client_name}</option>)}
             </select>
-            <span style={{ fontSize: '11px', color: '#888' }}>Campaign baru dari CSV akan di-assign ke client ini</span>
+          </div>
+          <div>
+            <Label>Platform default (untuk row tanpa platform)</Label>
+            <div style={{ marginTop: '4px' }}>
+              <PlatformToggle value={csvDefaultPlatform} onChange={handleDefaultPlatformChange} />
+            </div>
+            <div style={{ fontSize: '10px', color: '#888', marginTop: '5px' }}>
+              Digunakan jika kolom platform kosong dan nama campaign tidak bisa dideteksi
+            </div>
           </div>
         </div>
 
@@ -497,7 +589,7 @@ export default function DataInputTab() {
             {csvFile ? csvFile.name : 'Klik untuk upload file CSV'}
           </div>
           <div style={{ fontSize: '11px', color: '#888' }}>
-            {csvFile ? `${csvData.length} baris data terdeteksi` : 'Format: .csv — dari Meta Ads Manager, Google Ads, atau TikTok Ads'}
+            {csvFile ? `${csvRows.length} baris data terdeteksi` : 'Format: .csv — dari Meta Ads Manager, Google Ads, atau TikTok Ads'}
           </div>
           <input type="file" accept=".csv" style={{ display: 'none' }} onChange={handleCsvUpload} />
         </label>
@@ -506,54 +598,98 @@ export default function DataInputTab() {
           <div style={{ textAlign: 'center', padding: '12px', fontSize: '12px', color: '#888' }}>Menganalisis file...</div>
         )}
 
-        {!analyzingCsv && csvData.length > 0 && (
+        {!analyzingCsv && csvRows.length > 0 && (
           <div style={{ marginBottom: '16px' }}>
-            <div style={{ display: 'flex', gap: '10px', marginBottom: '12px', flexWrap: 'wrap' }}>
+            {/* Platform summary */}
+            <div style={{ display: 'flex', gap: '10px', marginBottom: '12px', flexWrap: 'wrap', alignItems: 'center' }}>
               <div style={{ background: '#EAF3DE', color: '#27500A', fontSize: '11px', padding: '6px 12px', borderRadius: '6px', fontWeight: 500 }}>
                 ✓ {csvPreview.matched} baris siap diimport
               </div>
-              {csvPreview.unmatched.length > 0 && (
+              {Object.entries(platformSummary).map(([p, count]) => {
+                const s = PLATFORM_STYLE[p] || { bg: '#F1EFE8', color: '#444441' }
+                return (
+                  <div key={p} style={{ background: s.bg, color: s.color, fontSize: '11px', padding: '6px 12px', borderRadius: '6px', fontWeight: 500 }}>
+                    {p}: {count} baris
+                  </div>
+                )
+              })}
+              {csvPreview.newCampaigns.length > 0 && (
                 <div style={{ background: '#E6F1FB', color: '#185FA5', fontSize: '11px', padding: '6px 12px', borderRadius: '6px' }}>
-                  ℹ {csvPreview.unmatched.length} campaign baru akan dibuat otomatis
+                  ℹ {csvPreview.newCampaigns.length} campaign baru akan dibuat
                 </div>
               )}
             </div>
 
-            {csvPreview.unmatched.length > 0 && (
+            {csvPreview.newCampaigns.length > 0 && (
               <div style={{ background: '#E6F1FB', borderRadius: '8px', padding: '10px 14px', marginBottom: '12px', fontSize: '11px', color: '#185FA5' }}>
-                {csvPreview.unmatched.slice(0, 5).map((w, i) => <div key={i}>• {w}</div>)}
+                {csvPreview.newCampaigns.slice(0, 5).map((name, i) => (
+                  <div key={i}>• Campaign baru akan dibuat: <strong>"{name}"</strong></div>
+                ))}
               </div>
             )}
 
+            {/* Preview table with editable platform per row */}
             <div style={{ overflowX: 'auto', border: '0.5px solid rgba(0,0,0,0.08)', borderRadius: '8px' }}>
-              <div style={{ fontSize: '11px', color: '#888', padding: '8px 10px', borderBottom: '0.5px solid rgba(0,0,0,0.08)' }}>
-                Preview 5 baris pertama dari {csvData.length} total
+              <div style={{ fontSize: '11px', color: '#888', padding: '8px 10px', borderBottom: '0.5px solid rgba(0,0,0,0.08)', display: 'flex', justifyContent: 'space-between' }}>
+                <span>Preview 5 baris pertama dari {csvRows.length} total — klik platform untuk ubah</span>
               </div>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '11px' }}>
                 <thead>
-                  <tr>{Object.keys(csvPreview.rows[0] || {}).map(h => (
-                    <th key={h} style={{ padding: '6px 10px', background: '#f5f5f3', textAlign: 'left', borderBottom: '0.5px solid rgba(0,0,0,0.08)', fontWeight: 500, color: '#888', whiteSpace: 'nowrap' }}>{h}</th>
-                  ))}</tr>
+                  <tr>
+                    <th style={{ padding: '6px 10px', background: '#f5f5f3', textAlign: 'left', borderBottom: '0.5px solid rgba(0,0,0,0.08)', fontWeight: 500, color: '#888', whiteSpace: 'nowrap' }}>campaign_name</th>
+                    <th style={{ padding: '6px 10px', background: '#f5f5f3', textAlign: 'left', borderBottom: '0.5px solid rgba(0,0,0,0.08)', fontWeight: 500, color: '#888', whiteSpace: 'nowrap' }}>platform (editable)</th>
+                    <th style={{ padding: '6px 10px', background: '#f5f5f3', textAlign: 'left', borderBottom: '0.5px solid rgba(0,0,0,0.08)', fontWeight: 500, color: '#888', whiteSpace: 'nowrap' }}>report_date</th>
+                    <th style={{ padding: '6px 10px', background: '#f5f5f3', textAlign: 'left', borderBottom: '0.5px solid rgba(0,0,0,0.08)', fontWeight: 500, color: '#888', whiteSpace: 'nowrap' }}>spend</th>
+                    <th style={{ padding: '6px 10px', background: '#f5f5f3', textAlign: 'left', borderBottom: '0.5px solid rgba(0,0,0,0.08)', fontWeight: 500, color: '#888', whiteSpace: 'nowrap' }}>impressions</th>
+                    <th style={{ padding: '6px 10px', background: '#f5f5f3', textAlign: 'left', borderBottom: '0.5px solid rgba(0,0,0,0.08)', fontWeight: 500, color: '#888', whiteSpace: 'nowrap' }}>clicks</th>
+                  </tr>
                 </thead>
                 <tbody>
                   {csvPreview.rows.map((row, i) => (
-                    <tr key={i}>{Object.values(row).map((v, j) => (
-                      <td key={j} style={{ padding: '5px 10px', borderBottom: '0.5px solid rgba(0,0,0,0.05)', whiteSpace: 'nowrap' }}>{v}</td>
-                    ))}</tr>
+                    <tr key={i} style={{ background: i % 2 === 1 ? '#fafaf9' : '#fff' }}>
+                      <td style={{ padding: '6px 10px', borderBottom: '0.5px solid rgba(0,0,0,0.05)', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 500 }}>
+                        {row.campaign_name || '—'}
+                      </td>
+                      <td style={{ padding: '4px 10px', borderBottom: '0.5px solid rgba(0,0,0,0.05)' }}>
+                        {/* Inline platform selector per row */}
+                        <select
+                          value={row._resolvedPlatform}
+                          onChange={e => handleRowPlatformOverride(i, e.target.value)}
+                          style={{
+                            fontSize: '10px', padding: '2px 6px', borderRadius: '99px', fontWeight: 600,
+                            background: PLATFORM_STYLE[row._resolvedPlatform]?.bg || '#F1EFE8',
+                            color: PLATFORM_STYLE[row._resolvedPlatform]?.color || '#444441',
+                            border: `1px solid ${PLATFORM_STYLE[row._resolvedPlatform]?.bg || '#F1EFE8'}`,
+                            cursor: 'pointer', outline: 'none',
+                          }}
+                        >
+                          {PLATFORMS.map(p => <option key={p} value={p}>{p}</option>)}
+                        </select>
+                      </td>
+                      <td style={{ padding: '6px 10px', borderBottom: '0.5px solid rgba(0,0,0,0.05)', whiteSpace: 'nowrap' }}>{row.report_date || row.date || '—'}</td>
+                      <td style={{ padding: '6px 10px', borderBottom: '0.5px solid rgba(0,0,0,0.05)', whiteSpace: 'nowrap' }}>{row.spend ? `Rp ${Number(row.spend).toLocaleString('id')}` : '—'}</td>
+                      <td style={{ padding: '6px 10px', borderBottom: '0.5px solid rgba(0,0,0,0.05)' }}>{row.impressions || '—'}</td>
+                      <td style={{ padding: '6px 10px', borderBottom: '0.5px solid rgba(0,0,0,0.05)' }}>{row.clicks || '—'}</td>
+                    </tr>
                   ))}
                 </tbody>
               </table>
+              {csvRows.length > 5 && (
+                <div style={{ padding: '8px 10px', fontSize: '11px', color: '#aaa', borderTop: '0.5px solid rgba(0,0,0,0.05)' }}>
+                  + {csvRows.length - 5} baris lainnya tidak ditampilkan. Platform untuk semua baris mengikuti deteksi otomatis atau default yang dipilih.
+                </div>
+              )}
             </div>
           </div>
         )}
 
         <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-          <button onClick={handleCsvImport} disabled={loadingCsv || csvData.length === 0}
-            style={{ padding: '10px 24px', background: csvData.length > 0 ? '#3B6D11' : '#ccc', color: '#fff', border: 'none', borderRadius: '8px', fontSize: '12px', fontWeight: 500, cursor: csvData.length > 0 ? 'pointer' : 'not-allowed', opacity: loadingCsv ? 0.7 : 1 }}>
-            {loadingCsv ? 'Mengimport...' : csvData.length > 0 ? `Import ${csvData.length} baris` : 'Import CSV'}
+          <button onClick={handleCsvImport} disabled={loadingCsv || csvRows.length === 0}
+            style={{ padding: '10px 24px', background: csvRows.length > 0 ? '#3B6D11' : '#ccc', color: '#fff', border: 'none', borderRadius: '8px', fontSize: '12px', fontWeight: 500, cursor: csvRows.length > 0 ? 'pointer' : 'not-allowed', opacity: loadingCsv ? 0.7 : 1 }}>
+            {loadingCsv ? 'Mengimport...' : csvRows.length > 0 ? `Import ${csvRows.length} baris` : 'Import CSV'}
           </button>
           {csvFile && (
-            <button onClick={() => { setCsvFile(null); setCsvData([]); setCsvPreview({ matched: 0, unmatched: [], rows: [] }) }}
+            <button onClick={() => { setCsvFile(null); setCsvRows([]); setCsvPreview({ matched: 0, newCampaigns: [], rows: [] }) }}
               style={{ padding: '10px 16px', background: '#fff', color: '#888', border: '0.5px solid rgba(0,0,0,0.15)', borderRadius: '8px', fontSize: '12px', cursor: 'pointer' }}>
               Reset
             </button>

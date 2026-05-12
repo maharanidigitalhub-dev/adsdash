@@ -80,11 +80,9 @@ export default function CampaignTab({
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
 
-  // Simpan filters di ref agar fetchData selalu akses nilai terbaru
   const filtersRef = useRef(globalData?.filters)
   filtersRef.current = globalData?.filters
 
-  // Ekstrak nilai primitif untuk dependency array — hindari object reference
   const platform = globalData?.filters?.platform ?? 'All'
   const dateFrom  = globalData?.filters?.dateRange?.from ?? ''
   const dateTo    = globalData?.filters?.dateRange?.to ?? ''
@@ -97,41 +95,72 @@ export default function CampaignTab({
     setLoading(true)
     const filters = filtersRef.current
 
-    let query = supabase
+    // FIX: Fetch campaign metadata (including correct platform) from dim_campaigns directly
+    // This ensures platform reflects what's stored in dim_campaigns, not fact_daily_performance
+    let campMetaQuery = supabase
+      .from('dim_campaigns')
+      .select('campaign_id, campaign_name, objective, status, dim_platforms(platform_name)')
+
+    if (clientId !== 'all') campMetaQuery = campMetaQuery.eq('client_id', clientId)
+
+    // Apply platform filter at campaign level
+    if (filters?.platform && filters.platform !== 'All') {
+      // We'll filter after fetch using platform name
+    }
+
+    const { data: campMeta } = await campMetaQuery
+
+    if (!campMeta) { setLoading(false); return }
+
+    // Build a lookup map: campaign_id → { campaign_name, objective, status, platform_name }
+    const campMetaMap: Record<string, { campaign_name: string; objective: string; status: string; platform_name: string }> = {}
+    campMeta.forEach((c: any) => {
+      const pName = Array.isArray(c.dim_platforms)
+        ? c.dim_platforms[0]?.platform_name
+        : c.dim_platforms?.platform_name
+      campMetaMap[c.campaign_id] = {
+        campaign_name: c.campaign_name,
+        objective: c.objective ?? '—',
+        status: c.status ?? 'Active',
+        platform_name: pName ?? '—',
+      }
+    })
+
+    // Fetch performance data
+    let perfQuery = supabase
       .from('fact_daily_performance')
-      .select(`
-        report_date, spend, impressions, clicks,
-        conversions_7d_click, conversion_value,
-        campaign_id,
-        dim_campaigns(campaign_name, objective, status),
-        dim_platforms(platform_name)
-      `)
+      .select('report_date, spend, impressions, clicks, conversions_7d_click, conversion_value, campaign_id')
       .order('report_date', { ascending: true })
 
-    if (clientId !== 'all') query = query.eq('client_id', clientId)
+    if (clientId !== 'all') perfQuery = perfQuery.eq('client_id', clientId)
 
-    // Terapkan date range dari globalData.filters
     if (filters?.dateRange?.from && filters?.dateRange?.to) {
-      query = query
+      perfQuery = perfQuery
         .gte('report_date', filters.dateRange.from)
         .lte('report_date', filters.dateRange.to)
     }
 
-    const { data } = await query
-    if (!data) { setLoading(false); return }
+    const { data: perfData } = await perfQuery
+    if (!perfData) { setLoading(false); return }
 
     const campMap: Record<string, CampaignRow> = {}
     const dateMap: Record<string, Record<string, number>> = {}
 
-    data.forEach((r: any) => {
+    perfData.forEach((r: any) => {
       const id = r.campaign_id
-      const name      = Array.isArray(r.dim_campaigns) ? r.dim_campaigns[0]?.campaign_name : r.dim_campaigns?.campaign_name
-      const objective = Array.isArray(r.dim_campaigns) ? r.dim_campaigns[0]?.objective     : r.dim_campaigns?.objective
-      const status    = Array.isArray(r.dim_campaigns) ? r.dim_campaigns[0]?.status        : r.dim_campaigns?.status
-      const p         = Array.isArray(r.dim_platforms) ? r.dim_platforms[0]?.platform_name : r.dim_platforms?.platform_name
+      const meta = campMetaMap[id]
+      if (!meta) return // skip if campaign not found in metadata
 
       if (!campMap[id]) {
-        campMap[id] = { campaign_id: id, campaign_name: name, objective, status, platform_name: p, spend: 0, impressions: 0, clicks: 0, conversions: 0, revenue: 0, ctr: 0, cpc: 0, cpa: 0, roas: 0 }
+        campMap[id] = {
+          campaign_id: id,
+          campaign_name: meta.campaign_name,
+          objective: meta.objective,
+          status: meta.status,
+          platform_name: meta.platform_name, // FIX: platform from dim_campaigns, not fact table
+          spend: 0, impressions: 0, clicks: 0, conversions: 0, revenue: 0,
+          ctr: 0, cpc: 0, cpa: 0, roas: 0,
+        }
       }
       campMap[id].spend       += Number(r.spend)
       campMap[id].impressions += Number(r.impressions)
@@ -139,6 +168,7 @@ export default function CampaignTab({
       campMap[id].conversions += Number(r.conversions_7d_click)
       campMap[id].revenue     += Number(r.conversion_value)
 
+      const name = meta.campaign_name
       const date = r.report_date?.slice(5)
       if (!dateMap[date]) dateMap[date] = {}
       dateMap[date][name] = (dateMap[date][name] || 0) + Number(r.spend)
@@ -152,7 +182,7 @@ export default function CampaignTab({
       roas: c.spend > 0       ? c.revenue / c.spend            : 0,
     }))
 
-    // Filter platform (konsisten dengan App.tsx)
+    // Apply platform filter
     if (filters?.platform && filters.platform !== 'All') {
       campList = campList.filter(c =>
         c.platform_name?.toLowerCase() === filters.platform.toLowerCase()
@@ -161,12 +191,14 @@ export default function CampaignTab({
 
     setCampaigns(campList)
 
-    // Rebuild daily chart hanya untuk campaign yang lolos filter platform
+    // Rebuild daily chart only for campaigns that passed the filter
     const validIds = new Set(campList.map(c => c.campaign_id))
     const filteredDateMap: Record<string, Record<string, number>> = {}
-    data.forEach((r: any) => {
+    perfData.forEach((r: any) => {
       if (!validIds.has(r.campaign_id)) return
-      const name = Array.isArray(r.dim_campaigns) ? r.dim_campaigns[0]?.campaign_name : r.dim_campaigns?.campaign_name
+      const meta = campMetaMap[r.campaign_id]
+      if (!meta) return
+      const name = meta.campaign_name
       const date = r.report_date?.slice(5)
       if (!filteredDateMap[date]) filteredDateMap[date] = {}
       filteredDateMap[date][name] = (filteredDateMap[date][name] || 0) + Number(r.spend)
